@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import unicodedata
@@ -60,10 +61,9 @@ def flush(statements: list[str], published: dict[str, Any], args: Any) -> bool:
     sql_file.write_text("\n".join(statements))
     cmd = [WRANGLER, "d1", "execute", DB, "--file", str(sql_file),
            "--remote" if args.remote else "--local", "-y"]
-    try:
-        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
-    except subprocess.TimeoutExpired:
-        print("    ! d1 execute timed out; rows kept for the next flush")
+    result = run_bounded(cmd, timeout=300)
+    if result is None:
+        print("    ! d1 execute timed out; rows kept for the next flush", flush=True)
         return False
     if result.returncode != 0:
         print(f"    ! d1 execute failed: {result.stderr[:400]}")
@@ -146,6 +146,35 @@ def attribution_for(row: dict[str, Any]) -> str | None:
     return f'"{row["title"]}" by {artist}, licensed {row["license"]}. Source: {row["source_url"]}'
 
 
+def run_bounded(cmd: list[str], timeout: int) -> subprocess.CompletedProcess[str] | None:
+    """
+    Run a command, and actually kill it when it overruns.
+
+    subprocess.run(timeout=...) kills the direct child but then keeps waiting
+    on the stdout pipe — which node/wrangler's grandchildren still hold open —
+    so the call hangs forever anyway. That happened repeatedly here: a
+    `wrangler r2 object put` would sit at 0.0% CPU indefinitely, stalling the
+    whole publish with no output, indistinguishable from a slow upload.
+
+    Starting a new session and killing the process GROUP closes those pipes.
+    Returns None on timeout.
+    """
+    proc = subprocess.Popen(
+        cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            proc.kill()
+        proc.wait(timeout=15)
+        return None
+
+
 def upload(local: Path, key: str, remote: bool, dry: bool) -> bool:
     if dry:
         print(f"    would upload -> r2://{BUCKET}/{key}")
@@ -153,13 +182,9 @@ def upload(local: Path, key: str, remote: bool, dry: bool) -> bool:
     cmd = [WRANGLER, "r2", "object", "put", f"{BUCKET}/{key}",
            "--file", str(local), "--content-type", "audio/mpeg"]
     cmd.append("--remote" if remote else "--local")
-    try:
-        # Without a timeout a single hung upload stalls the entire run with no
-        # output and no way to tell it apart from slow progress. That happened:
-        # 27 tracks transcoded, then nothing, indefinitely.
-        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=240)
-    except subprocess.TimeoutExpired:
-        print("    ! upload timed out")
+    result = run_bounded(cmd, timeout=180)
+    if result is None:
+        print("    ! upload timed out", flush=True)
         return False
     if result.returncode != 0:
         print(f"    ! upload failed: {result.stderr.strip()[:300]}")
@@ -191,6 +216,14 @@ AUTO_MAX_MELODIC_MEAN = 0.010
 AUTO_MAX_PERCUSSION_RATIO = 0.01
 AUTO_MIN_LYRICS_CHARS = 40
 AUTO_MIN_DURATION = 20.0
+
+# A "track" longer than this is an album rip or a whole-channel archive, not a
+# recording. The corpus holds 45 of them, the longest running 2 hours 53
+# minutes. They are wrong for the catalog — nobody scores a video with a
+# three-hour file — and they dominated publish time, since transcoding one
+# costs more than the twenty short tracks queued behind it. Held for a human,
+# who can decide whether to split it.
+AUTO_MAX_DURATION = 900.0
 
 
 # Positive evidence that a recording belongs in THIS catalog.
@@ -325,6 +358,8 @@ def auto_verifiable(row: dict[str, Any]) -> tuple[bool, str]:
         return False, f"percussion present ({row.get('percussion_ratio')}) — duff vs drum kit needs an ear"
     if number("duration_seconds", 0.0) < AUTO_MIN_DURATION:
         return False, "too short to be useful as background audio"
+    if number("duration_seconds", 0.0) > AUTO_MAX_DURATION:
+        return False, "longer than 15 minutes — an album rip, not a track"
     return True, ""
 
 

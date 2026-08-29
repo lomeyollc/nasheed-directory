@@ -13,9 +13,18 @@ p = pathlib.Path('tools/work/published.json')
 print(len(json.loads(p.read_text())) if p.exists() else 0)"; }
 
 for round in $(seq 1 12); do
-  # Never start a second publisher; publish.py takes a pid lock, but waiting
-  # here keeps the log readable and avoids a pointless immediate exit.
-  while pgrep -f "publish.py --auto" >/dev/null; do sleep 30; done
+  # Wait on the LOCK FILE, not on pgrep.
+  #
+  # `pgrep -f "publish.py --auto"` matched any shell command whose text merely
+  # contained that string — including a monitoring one-liner running in another
+  # terminal. The loop then waited forever for a publisher that did not exist,
+  # printing nothing, looking exactly like a slow publish.
+  #
+  # publish.py already writes a pid lock and detects a stale one, so use it.
+  while [ -f tools/work/publish.lock ] \
+        && kill -0 "$(cat tools/work/publish.lock 2>/dev/null)" 2>/dev/null; do
+    sleep 30
+  done
   rm -f tools/work/publish.lock
 
   before=$(count)

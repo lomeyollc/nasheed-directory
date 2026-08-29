@@ -83,33 +83,57 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
         "Prefers a track long enough to cover the whole clip; falls back to a loopable one.",
       inputSchema: {
         video_duration_seconds: z.number().describe("How long the video is"),
-        mood: z.enum(["calm", "uplifting", "solemn", "joyful", "reflective"]).optional(),
+        mood: z
+          .enum(["calm", "uplifting", "solemn", "joyful", "reflective"])
+          .optional()
+          .describe("Sparsely populated. Treated as a preference, not a requirement — if no track carries it, it is relaxed and `relaxed_constraint` says so."),
         instrumentation: z.array(z.enum(["voice_only", "voice_duff", "duff_only"])).optional(),
         language: z.string().optional(),
         avoid_slugs: z.array(z.string()).optional().describe("Slugs already used, so you do not repeat yourself"),
       },
     },
     async ({ video_duration_seconds, mood, instrumentation, language, avoid_slugs }) => {
-      const base = { mood, instrumentation, language, sort: "random" as const, limit: 25 };
+      // Relax one constraint at a time, and report which one was dropped.
+      //
+      // The first version kept `mood` in every fallback, so when no track had
+      // a mood set the tool returned nothing at all for a perfectly ordinary
+      // request — the caller could not tell "no calm track" from "the tool is
+      // broken". Mood is the softest constraint and the sparsest field, so it
+      // is the first thing to go.
+      const attempts: { params: Parameters<typeof searchTracks>[2]; relaxed: string | null }[] = [
+        { params: { mood, instrumentation, language, min_duration: video_duration_seconds }, relaxed: null },
+        { params: { mood, instrumentation, language, loopable: true }, relaxed: "length (this track loops)" },
+        { params: { mood, instrumentation, language }, relaxed: "length" },
+        { params: { instrumentation, language }, relaxed: "mood" },
+        { params: { language }, relaxed: "mood and instrumentation" },
+        { params: {}, relaxed: "every optional filter" },
+      ];
 
-      // First choice: long enough to cover the clip with no looping at all.
-      let pool = await searchTracks(env.DB, env.APP_URL, {
-        ...base,
-        min_duration: video_duration_seconds,
-      });
-
-      // Fall back to anything that loops cleanly, which can cover any length.
-      if (pool.tracks.length === 0) {
-        pool = await searchTracks(env.DB, env.APP_URL, { ...base, loopable: true });
-      }
-      // Last resort: ignore length entirely and say so in the response.
-      if (pool.tracks.length === 0) {
-        pool = await searchTracks(env.DB, env.APP_URL, base);
-      }
-
+      let pool = { tracks: [] as Awaited<ReturnType<typeof searchTracks>>["tracks"] };
+      let relaxed: string | null = null;
       const avoid = new Set(avoid_slugs ?? []);
-      const candidates = pool.tracks.filter((t) => !avoid.has(t.slug));
-      const pick = candidates[0] ?? pool.tracks[0];
+
+      for (const attempt of attempts) {
+        const result = await searchTracks(env.DB, env.APP_URL, {
+          ...attempt.params,
+          sort: "random",
+          limit: 25,
+        });
+        const usable = result.tracks.filter((t) => !avoid.has(t.slug));
+        if (usable.length > 0) {
+          pool = { tracks: usable };
+          relaxed = attempt.relaxed;
+          break;
+        }
+        // Keep the last non-empty result so an avoid-list that excludes
+        // everything still returns something rather than nothing.
+        if (result.tracks.length > 0 && pool.tracks.length === 0) {
+          pool = { tracks: result.tracks };
+          relaxed = attempt.relaxed;
+        }
+      }
+
+      const pick = pool.tracks[0];
 
       if (!pick) {
         return asText({ error: "No track in the catalog matches those constraints yet." });
@@ -117,6 +141,10 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
 
       return asText({
         track: pick,
+        // Say plainly when the request could not be met exactly. Silently
+        // returning a track that ignores the caller's mood is worse than
+        // telling them it was dropped.
+        relaxed_constraint: relaxed,
         fits_without_looping: pick.duration_seconds >= video_duration_seconds,
         needs_looping: pick.duration_seconds < video_duration_seconds,
         loops_cleanly: pick.is_loopable,
