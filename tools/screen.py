@@ -48,6 +48,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -240,6 +241,12 @@ def bucket_indices(class_names: list[str]) -> dict[str, list[int]]:
     return out
 
 
+class MetadataUnavailable(Exception):
+    """The source refused to tell us about this item. Retryable, NOT a verdict
+    that the item has no audio — conflating the two silently discards good
+    candidates and never looks at them again."""
+
+
 def resolve_download_url(candidate: dict[str, Any]) -> str | None:
     """
     Candidates from Commons and Openverse already carry a direct file URL.
@@ -252,15 +259,33 @@ def resolve_download_url(candidate: dict[str, Any]) -> str | None:
         return None
 
     ident = candidate["source_id"]
-    result = subprocess.run(
-        ["curl", "-sS", "-L", "-m", "60", f"https://archive.org/metadata/{ident}"],
-        capture_output=True,
-        text=True,
-    )
-    try:
-        meta = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+
+    # Retry: archive.org throttles, and a throttled metadata call returns an
+    # HTML page rather than JSON. A single attempt recorded that as
+    # "no_audio_url" — a permanent verdict — for items that in fact hold 87
+    # MP3s. 23 of the first 51 candidates were lost to this, which is the same
+    # mistake as the Wikimedia 429: a refusal read as an absence.
+    meta = None
+    for attempt in range(4):
+        result = subprocess.run(
+            ["curl", "-sS", "-L", "-m", "90",
+             "-H", f"User-Agent: {USER_AGENT}", f"https://archive.org/metadata/{ident}"],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            try:
+                meta = json.loads(result.stdout)
+                break
+            except json.JSONDecodeError:
+                pass
+        if attempt < 3:
+            time.sleep(5 * (attempt + 1))
+
+    if meta is None:
+        # Distinct from "this item has no audio". Raised so the caller can
+        # record it as retryable rather than caching it as a final answer.
+        raise MetadataUnavailable(ident)
 
     # Prefer a lossy derivative: it is what we would serve anyway, and the
     # original is often a 300 MB FLAC we would only transcode down.
@@ -545,7 +570,14 @@ def main() -> int:
         label = candidate["title"][:60]
         print(f"[{index}/{len(todo)}] {label}")
 
-        url = resolve_download_url(candidate)
+        try:
+            url = resolve_download_url(candidate)
+        except MetadataUnavailable:
+            # Deliberately NOT recorded in `done`: leaving it out means the
+            # next run retries it instead of treating a throttle as a verdict.
+            print("  ! metadata unavailable (will retry on next run)")
+            continue
+
         if not url:
             done[key] = {**candidate, "key": key, "status": "no_audio_url"}
             continue
