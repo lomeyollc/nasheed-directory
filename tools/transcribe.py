@@ -48,6 +48,7 @@ import json
 import re
 import shutil
 import subprocess
+import unicodedata
 import sys
 from pathlib import Path
 from typing import Any
@@ -93,6 +94,16 @@ MEDIA_FOUNDATIONS = [
 
 CONTENT_FLAGS = {
     "media-foundation": MEDIA_FOUNDATIONS,
+    # Whisper annotates non-speech audio events in brackets, and it turns out
+    # to be one of the most decisive signals available: the al-Shabaab track in
+    # this corpus transcribed as "(Explosion)" before a single word. Gunfire
+    # and explosions layered into a nasheed are a production choice, not an
+    # accident of the recording.
+    "battle-sounds": [
+        "(explosion)", "(explosions)", "(gunshot", "(gunfire", "(gun shot",
+        "(machine gun", "(bomb", "(blast", "(shooting", "(weapon",
+        "(sound of gunfire", "(war sounds", "(marching",
+    ],
     "violence": [
         "kill", "slay", "slaughter", "behead", "blood", "sword", "rifle", "gun",
         "bomb", "explode", "war", "battle", "fight", "army", "soldier", "weapon",
@@ -179,14 +190,61 @@ def detect_language(wav: Path, model: Path) -> str | None:
     return match.group(1) if match else None
 
 
+def _normalise(text: str) -> str:
+    """
+    Fold diacritics before matching.
+
+    Whisper romanises Arabic with macrons and apostrophes — "Al-Bashā'ir", not
+    "Al-Bashair" — so a plain substring list silently misses the exact studio
+    idents it was written for. This already caused one regression where a track
+    produced by Al-Bashair came back clean. Normalise instead of trying to
+    enumerate every spelling.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.replace("'", "").replace("\u2019", "").replace("-", " ")
+
+
 def content_flags(english: str) -> dict[str, list[str]]:
-    low = english.lower()
+    low = _normalise(english)
     found: dict[str, list[str]] = {}
     for category, words in CONTENT_FLAGS.items():
-        hits = [w for w in words if w in low]
+        hits = [w for w in words if _normalise(w) in low]
         if hits:
             found[category] = hits
     return found
+
+
+LYRIC_FIELDS = ("lyrics_english", "lyrics_language", "lyrics_flags", "lyrics_model")
+
+
+def save_lyrics(rows: list[dict[str, Any]]) -> None:
+    """Write ONLY the lyric fields back, merged onto whatever is on disk now.
+
+    The mirror of save_screened() in screen.py: screening may have analysed new
+    tracks while whisper was running, and overwriting the file with the list we
+    loaded at startup would discard them."""
+    on_disk: dict[str, dict[str, Any]] = {}
+    if SCREENED.exists():
+        try:
+            for row in json.loads(SCREENED.read_text()):
+                if row.get("key"):
+                    on_disk[row["key"]] = row
+        except json.JSONDecodeError:
+            pass
+
+    for row in rows:
+        key = row.get("key")
+        if not key:
+            continue
+        target = on_disk.setdefault(key, row)
+        for field in LYRIC_FIELDS:
+            if field in row:
+                target[field] = row[field]
+
+    tmp = SCREENED.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(list(on_disk.values()), indent=1, ensure_ascii=False))
+    tmp.replace(SCREENED)
 
 
 def main() -> int:
@@ -257,9 +315,9 @@ def main() -> int:
         if flags:
             print(f"  !! CONTENT FLAGS: {', '.join(flags)}")
 
-        SCREENED.write_text(json.dumps(rows, indent=1, ensure_ascii=False))
+        save_lyrics(rows)
 
-    SCREENED.write_text(json.dumps(rows, indent=1, ensure_ascii=False))
+    save_lyrics(rows)
 
     done = [r for r in rows if r.get("lyrics_english")]
     flagged = [r for r in done if r.get("lyrics_flags")]

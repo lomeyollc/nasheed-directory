@@ -39,6 +39,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import unicodedata
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
@@ -81,6 +82,12 @@ def load_screened() -> list[dict[str, Any]]:
     # list is exactly the kind of thing that keeps growing.
     for row in rows:
         row["extremism_flags"] = extremism_flags(row)
+        # Same reasoning, applied to the lyric flags: recompute from the stored
+        # translation on every load. Re-transcribing to pick up a new flag word
+        # would cost a minute per track; recomputing costs nothing, and it means
+        # a flag added today protects every track transcribed last week.
+        if row.get("lyrics_english"):
+            row["lyrics_flags"] = lyric_flags(row["lyrics_english"])
 
     # Tracks whose translated lyrics tripped a content flag sort last: the
     # reviewer should meet the straightforward ones first and hit the
@@ -108,6 +115,63 @@ def extremism_flags(candidate: dict[str, Any]) -> list[str]:
         str(candidate.get(f) or "") for f in ("title", "artist", "description", "uploader")
     ).lower()
     return [m for m in EXTREMIST_MARKERS if m.lower() in haystack]
+
+
+# Kept in sync with tools/transcribe.py, duplicated for the same reason as
+# EXTREMIST_MARKERS: importing that module is cheap, but keeping review.py free
+# of any dependency it does not need to serve audio is worth the duplication.
+LYRIC_FLAGS = {
+    "battle-sounds": [
+        "(explosion)", "(explosions)", "(gunshot", "(gunfire", "(gun shot",
+        "(machine gun", "(bomb", "(blast", "(shooting", "(weapon",
+        "(sound of gunfire", "(war sounds", "(marching",
+    ],
+    "media-foundation": [
+        "bashair", "basha'ir", "munasiroon", "munasirun", "ajnad", "al-furqan",
+        "furqan", "hayat media", "al-battar", "battar", "ashhad", "ghuraba",
+        "itisam", "amaq",
+    ],
+    "violence": [
+        "kill", "slay", "slaughter", "behead", "blood", "sword", "rifle", "gun",
+        "bomb", "explode", "war", "battle", "fight", "army", "soldier", "weapon",
+        "conquer", "raid", "avenge", "revenge", "destroy them", "death to",
+    ],
+    "martyrdom": [
+        "martyr", "martyrdom", "shahid", "sacrifice my life", "die for", "paradise awaits",
+    ],
+    "group-praise": [
+        "islamic state", "caliphate", "our state", "brigade", "battalion",
+        "mujahideen", "jihad", "taliban", "al-qaeda", "shabaab",
+    ],
+    "romance": [
+        "her lips", "his lips", "kiss", "lover", "romance", "your beauty",
+        "in love with", "embrace her", "embrace him", "desire you",
+    ],
+}
+
+
+def _normalise(text: str) -> str:
+    """
+    Fold diacritics before matching.
+
+    Whisper romanises Arabic with macrons and apostrophes — "Al-Bashā'ir", not
+    "Al-Bashair" — so a plain substring list silently misses the exact studio
+    idents it was written for. This already caused one regression where a track
+    produced by Al-Bashair came back clean. Normalise instead of trying to
+    enumerate every spelling.
+    """
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.replace("'", "").replace("\u2019", "").replace("-", " ")
+
+
+def lyric_flags(english: str) -> dict[str, list[str]]:
+    low = _normalise(english)
+    return {
+        category: hits
+        for category, words in LYRIC_FLAGS.items()
+        if (hits := [w for w in words if _normalise(w) in low])
+    }
 
 
 def load_decisions() -> dict[str, dict[str, Any]]:

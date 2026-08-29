@@ -210,6 +210,48 @@ def is_relevant(candidate: dict[str, Any]) -> bool:
     return any(word in haystack for word in RELEVANT)
 
 
+# Fields owned by OTHER pipeline stages. screen.py must never clobber them.
+FOREIGN_FIELDS = ("lyrics_english", "lyrics_language", "lyrics_flags", "lyrics_model")
+
+
+def save_screened(done: dict[str, dict[str, Any]]) -> None:
+    """
+    Merge into screened.json rather than overwriting it.
+
+    This function exists because of a real data loss. screen.py used to write
+    its whole in-memory dict over the file. transcribe.py writes lyrics into
+    the SAME file. Running both — which is the obvious thing to do, since
+    screening is slow and transcription is independent — meant the screener's
+    next write silently reverted twenty transcriptions that had cost half an
+    hour of whisper time. No error, no warning; the lyrics were simply gone.
+
+    Each stage owns its own fields. On write we re-read what is on disk and
+    carry over anything we do not own, so concurrent stages compose instead of
+    racing.
+    """
+    on_disk: dict[str, dict[str, Any]] = {}
+    if SCREENED.exists():
+        try:
+            for row in json.loads(SCREENED.read_text()):
+                if row.get("key"):
+                    on_disk[row["key"]] = row
+        except json.JSONDecodeError:
+            pass
+
+    merged = dict(on_disk)
+    for key, row in done.items():
+        previous = on_disk.get(key, {})
+        combined = {**row}
+        for field in FOREIGN_FIELDS:
+            if field in previous and field not in combined:
+                combined[field] = previous[field]
+        merged[key] = combined
+
+    tmp = SCREENED.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(list(merged.values()), indent=1, ensure_ascii=False))
+    tmp.replace(SCREENED)
+
+
 def load_yamnet():
     try:
         import tensorflow_hub as hub  # noqa: PLC0415
@@ -624,9 +666,9 @@ def main() -> int:
         flag = " (percussion — needs ear)" if analysis["needs_human_percussion_check"] else ""
         print(f"  -> {verdict}{flag}  melodic={analysis['melodic_ratio']:.3f} voice={analysis['voice_ratio']:.3f}")
 
-        SCREENED.write_text(json.dumps(list(done.values()), indent=1, ensure_ascii=False))
+        save_screened(done)
 
-    SCREENED.write_text(json.dumps(list(done.values()), indent=1, ensure_ascii=False))
+    save_screened(done)
 
     tally: dict[str, int] = {}
     for row in done.values():
