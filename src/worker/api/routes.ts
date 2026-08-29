@@ -48,8 +48,11 @@ export async function handleApiRequest(request: Request, env: Env): Promise<Resp
   }
 
   // ── Public read mirror, used by this site's own UI ──────────────────────
+  // `/api/public/v1/stats` -> `/api/v1/stats`. Drop only the `public`
+  // segment: rewriting the whole `/api/public/` prefix to `/api/v1/` would
+  // produce `/api/v1/v1/stats`, which 404s.
   if (path.startsWith("/api/public/")) {
-    return handleReads(request, env, path.replace("/api/public/", "/api/v1/"), url);
+    return handleReads(request, env, `/api${path.slice("/api/public".length)}`, url);
   }
 
   // ── Everything else under /api/v1 needs a key ──────────────────────────
