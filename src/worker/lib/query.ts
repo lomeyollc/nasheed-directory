@@ -1,4 +1,4 @@
-import { CLEAN_INSTRUMENTATION, TRUSTED_TIERS } from "./rubric";
+import { CLEAN_INSTRUMENTATION, HUMAN_TIERS, TRUSTED_TIERS } from "./rubric";
 import { toTrack, type Track, type TrackRow } from "./types";
 
 /**
@@ -27,6 +27,13 @@ export interface SearchParams {
    * human has checked, and should have had to mean it.
    */
   include_unverified?: boolean;
+  /**
+   * Set false to require a human reviewer. Defaults to true: machine-verified
+   * tracks are returned and labelled, so a caller who wants only
+   * human-checked audio asks for it explicitly rather than the catalog
+   * appearing empty to everyone by default.
+   */
+  include_automated?: boolean;
   limit?: number;
   offset?: number;
   sort?: "newest" | "duration" | "title" | "random";
@@ -61,8 +68,9 @@ export async function searchTracks(
   binds.push(...CLEAN_INSTRUMENTATION);
 
   if (!params.include_unverified) {
-    where.push(`t.verification_status IN (${TRUSTED_TIERS.map(() => "?").join(",")})`);
-    binds.push(...TRUSTED_TIERS);
+    const tiers = params.include_automated === false ? HUMAN_TIERS : TRUSTED_TIERS;
+    where.push(`t.verification_status IN (${tiers.map(() => "?").join(",")})`);
+    binds.push(...tiers);
   }
 
   if (params.instrumentation?.length) {

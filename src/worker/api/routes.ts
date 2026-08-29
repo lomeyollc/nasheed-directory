@@ -139,6 +139,7 @@ function parseSearchParams(url: URL): SearchParams {
     max_duration: num("max_duration"),
     loopable: bool("loopable"),
     include_unverified: bool("include_unverified") ?? false,
+    include_automated: bool("include_automated"),
     limit: num("limit"),
     offset: num("offset"),
     sort:

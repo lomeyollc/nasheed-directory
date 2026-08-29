@@ -104,7 +104,15 @@ export const RUBRIC: {
 
   verification_tiers: {
     community_submitted:
-      "Present in the database, not yet vetted by anyone. Never returned by default.",
+      "Present in the database, not yet vetted by anyone. Never returned by default, and never publishable.",
+    automated_verified:
+      "NO HUMAN HAS LISTENED TO THIS TRACK. A machine checked it: signal analysis found no melodic " +
+      "instrument and no percussion at all, the audio was transcribed and translated and its lyrics " +
+      "tripped no content flag, and the licence was read from its source. The detector and model " +
+      "versions are recorded in `verified_by` and the evidence in `detector_evidence`. This tier is " +
+      "held to a STRICTER instrumentation bar than a human reviewer applies, because a machine gets " +
+      "no benefit of the doubt — but machine translation of sung poetry is rough, so treat it as a " +
+      "strong signal rather than a certification. Exclude it with include_automated=false.",
     maintainer_verified:
       "A maintainer listened to the whole track and applied this rubric. Attributed and dated.",
     scholar_reviewed:
@@ -124,5 +132,17 @@ export const RUBRIC: {
 /** Instrumentation values that satisfy the instrumentation clause. */
 export const CLEAN_INSTRUMENTATION = ["voice_only", "voice_duff", "duff_only"] as const;
 
-/** Verification tiers the API returns unless a caller opts into more. */
-export const TRUSTED_TIERS = ["maintainer_verified", "scholar_reviewed"] as const;
+/** Tiers involving a person. The strongest claim the catalog makes. */
+export const HUMAN_TIERS = ["maintainer_verified", "scholar_reviewed"] as const;
+
+/**
+ * Tiers the API returns by default. `automated_verified` is included because
+ * excluding it would leave the catalog empty until every track has been
+ * listened to end to end, and a catalog nobody can use protects nobody. It is
+ * labelled precisely on every record, and one parameter removes it.
+ */
+export const TRUSTED_TIERS = [
+  "automated_verified",
+  "maintainer_verified",
+  "scholar_reviewed",
+] as const;

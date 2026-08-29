@@ -2,6 +2,7 @@ export type Instrumentation = "voice_only" | "voice_duff" | "duff_only" | "has_m
 
 export type VerificationStatus =
   | "community_submitted"
+  | "automated_verified"
   | "maintainer_verified"
   | "scholar_reviewed";
 

@@ -42,6 +42,7 @@ interface Seed {
   instrumentation: string;
   verification_status: string;
   published: number;
+  content_reviewed?: number;
   title?: string;
   duration?: number;
   license?: string;
@@ -130,6 +131,35 @@ describe("searchTracks safety filters", () => {
     const result = await searchTracks(env.DB, APP, {});
     expect(result.tracks.map((t) => t.slug).sort()).toEqual(["clean-duff", "clean-voice"]);
     expect(result.total).toBe(2);
+  });
+});
+
+describe("automated verification tier", () => {
+  beforeEach(async () => {
+    await seed([
+      { slug: "by-machine", instrumentation: "voice_only", verification_status: "automated_verified", published: 1 },
+      { slug: "by-human", instrumentation: "voice_only", verification_status: "maintainer_verified", published: 1 },
+    ]);
+  });
+
+  it("returns machine-verified tracks by default", async () => {
+    // The alternative was a catalog that stays empty until a person has
+    // listened to every recording, which protects nobody.
+    const result = await searchTracks(env.DB, APP, {});
+    expect(result.tracks.map((t) => t.slug).sort()).toEqual(["by-human", "by-machine"]);
+  });
+
+  it("excludes them when a caller asks for human review only", async () => {
+    const result = await searchTracks(env.DB, APP, { include_automated: false });
+    expect(result.tracks.map((t) => t.slug)).toEqual(["by-human"]);
+  });
+
+  it("labels every track with the tier that actually checked it", async () => {
+    const result = await searchTracks(env.DB, APP, {});
+    const machine = result.tracks.find((t) => t.slug === "by-machine");
+    expect(machine?.verification_status).toBe("automated_verified");
+    // A consumer must be able to tell these apart without reading docs.
+    expect(machine?.content_reviewed).toBe(false);
   });
 });
 
