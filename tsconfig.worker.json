@@ -12,7 +12,11 @@
     "strict": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "types": ["@cloudflare/workers-types"]
+    // `@cloudflare/vitest-pool-workers/types` is what declares the
+    // `cloudflare:test` module the test files import. Without it the suite
+    // still RUNS (vitest resolves it at runtime) but tsc fails — so a green
+    // local test run is not evidence the typecheck passes.
+    "types": ["@cloudflare/workers-types", "@cloudflare/vitest-pool-workers/types"]
   },
   "include": ["src/worker", "worker-configuration.d.ts"]
 }
