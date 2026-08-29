@@ -118,6 +118,33 @@ def slugify(text: str) -> str:
     return slug[:80] or "untitled"
 
 
+def checkpoint(rows: list[dict[str, Any]]) -> None:
+    """
+    Merge `rows` into candidates.json and write it, after every search term.
+
+    Written after a run that spent forty minutes collecting 471 candidates
+    and held all of them in memory, one Ctrl-C away from nothing. archive.org
+    throttles hard enough that a full sweep takes the better part of an hour,
+    which is long enough that the run WILL be interrupted sooner or later.
+    """
+    existing: dict[str, dict[str, Any]] = {}
+    if CANDIDATES.exists():
+        try:
+            for row in json.loads(CANDIDATES.read_text()):
+                existing[f"{row['source_platform']}:{row['source_id']}"] = row
+        except (json.JSONDecodeError, KeyError):
+            pass  # A corrupt file must not lose the rows we hold right now.
+    for row in rows:
+        row.setdefault("slug", slugify(row["title"]))
+        existing[f"{row['source_platform']}:{row['source_id']}"] = row
+
+    # Write to a temp file and rename, so an interrupt during the write
+    # cannot leave a half-written candidates.json behind.
+    tmp = CANDIDATES.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(list(existing.values()), indent=1, ensure_ascii=False))
+    tmp.replace(CANDIDATES)
+
+
 # ---------------------------------------------------------------------------
 # archive.org
 # ---------------------------------------------------------------------------
@@ -171,6 +198,7 @@ def harvest_archive(terms: Iterable[str], per_term: int = 2000) -> list[dict[str
                 break
             time.sleep(0.3)
         print(f"  kept {len(out)} permissive so far", flush=True)
+        checkpoint(list(out.values()))
         time.sleep(4)  # archive.org throttles a fast term-by-term sweep
     return list(out.values())
 

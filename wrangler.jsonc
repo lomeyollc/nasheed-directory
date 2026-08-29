@@ -34,10 +34,17 @@
 
   "observability": { "enabled": true },
 
-  // Custom domain. Cloudflare provisions the DNS record and certificate for
-  // this hostname automatically on deploy, because lomeyo.com is already a
-  // zone on this account.
-  "routes": [{ "pattern": "nasheed.lomeyo.com", "custom_domain": true }],
+  // A ROUTE, not a custom domain, plus a hand-managed proxied AAAA 100::
+  // record in the lomeyo.com zone.
+  //
+  // The custom_domain path was tried first and failed in a way worth
+  // recording: Cloudflare reported the domain attached with a valid cert and
+  // showed the AAAA record in the API, but its own authoritative nameservers
+  // returned NXDOMAIN for the hostname for over half an hour, while four
+  // sibling records of identical shape (hive, folo, www) resolved fine.
+  // Deleting and recreating the custom domain twice did not fix it. A plain
+  // route over a record we own ourselves sidesteps that machinery entirely.
+  "routes": [{ "pattern": "nasheed.lomeyo.com/*", "zone_name": "lomeyo.com" }],
 
   "vars": { "APP_URL": "https://nasheed.lomeyo.com" }
 
