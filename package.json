@@ -1,0 +1,50 @@
+{
+  "name": "nasheed-directory",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Open-source, AI-agent-native directory of 100% halal, freely-licensed background audio. Vocals-only nasheeds and duff-only tracks, queryable by API.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lomeyollc/nasheed-directory.git"
+  },
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && wrangler deploy",
+    "cf-typegen": "wrangler types",
+    "check": "tsc -b --noEmit",
+    "d1:migrate:local": "wrangler d1 migrations apply nasheed-directory --local",
+    "d1:migrate:remote": "wrangler d1 migrations apply nasheed-directory --remote",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^1.31.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-router-dom": "^7.18.2",
+    "tailwind-merge": "^3.6.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.52.1",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
+    "@cloudflare/workers-types": "^5.20260814.1",
+    "@tailwindcss/vite": "^4.3.3",
+    "@types/node": "^26.2.0",
+    "@types/react": "^19.2.8",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^6.0.5",
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
+  }
+}

@@ -1,0 +1,116 @@
+/**
+ * The halal-audio rubric, as data.
+ *
+ * This is exported over the API (`GET /api/v1/rubric`, and the
+ * `get_halal_rubric` MCP tool) rather than living only in a README, because
+ * an AI agent picking background music needs to be able to read the rule it
+ * is being held to — not just the verdict. If a consumer follows a stricter
+ * or different opinion, they can read this, disagree with a specific clause,
+ * and filter on the raw `instrumentation` / `lyrics_*` facts instead.
+ *
+ * Scope note, stated plainly: this directory follows the position that
+ * musical instruments other than the duff (frame drum) are not permitted in
+ * this context. That is a real position held by many scholars, and it is not
+ * the only position held by Muslims. We apply it because it is the strictest
+ * common denominator — audio that passes this rubric is acceptable to
+ * someone following a more permissive view too, while the reverse is not
+ * true. Nothing here is a fatwa.
+ */
+
+export const RUBRIC_VERSION = "1.0.0";
+
+export interface RubricClause {
+  id: string;
+  rule: string;
+  /** How this clause is actually checked, so the claim is auditable. */
+  checked_by: "signal_analysis" | "human_review" | "license_document";
+  /** What makes a track FAIL this clause. */
+  disqualifies: string[];
+}
+
+export const RUBRIC: {
+  version: string;
+  summary: string;
+  position: string;
+  clauses: RubricClause[];
+  verification_tiers: Record<string, string>;
+  accepted_licenses: Record<string, string>;
+} = {
+  version: RUBRIC_VERSION,
+  summary:
+    "Human voice only, or human voice with duff (frame drum) only. No melodic instruments. " +
+    "No impermissible lyrical content. Freely licensed for commercial reuse.",
+  position:
+    "This directory applies the stricter scholarly position that melodic instruments are not " +
+    "permitted, with the duff (frame drum) as the recognised exception. This is not the only " +
+    "position among Muslims; it is used here because audio that passes it is also acceptable " +
+    "to someone following a more permissive view. This catalog is a tool, not a fatwa.",
+
+  clauses: [
+    {
+      id: "instrumentation",
+      rule: "The only permitted sound sources are the unaccompanied human voice and the duff (frame drum / daff / bendir).",
+      checked_by: "signal_analysis",
+      disqualifies: [
+        "Any pitched or melodic instrument: strings, wind, brass, piano, synthesiser, guitar, oud, ney, violin.",
+        "Drum kits, tuned percussion, and electronic drum machines. The exception is the duff specifically, not percussion generally.",
+        "Vocal-synth or vocoder layers that function as an instrumental pad rather than as a voice.",
+      ],
+    },
+    {
+      id: "lyrical-content",
+      rule: "Lyrics must be free of impermissible content.",
+      checked_by: "human_review",
+      disqualifies: [
+        "Romantic or sensual content.",
+        "Shirk, or praise attributing divine qualities to a created being.",
+        "Profanity, insult, or incitement.",
+        "Glorification of alcohol, gambling, or other impermissible acts.",
+        "Sectarian attack on other Muslims.",
+      ],
+    },
+    {
+      id: "instrument-imitation",
+      rule: "Vocal effects are permitted; vocal imitation of instruments is not.",
+      checked_by: "human_review",
+      disqualifies: [
+        "Beatboxing used as a substitute drum track.",
+        "Layered vocal pads pitched and sustained so as to function as an instrumental bed.",
+      ],
+    },
+    {
+      id: "license",
+      rule: "The recording must be freely licensed for commercial reuse and redistribution by its actual rights holder.",
+      checked_by: "license_document",
+      disqualifies: [
+        "NonCommercial (NC) licenses — they break the promise that this audio is usable in monetised work.",
+        "NoDerivatives (ND) licenses — they prevent trimming, looping, and mixing under a video.",
+        "A license asserted by a third-party uploader who is not the rights holder. Common on public archives and the single biggest source of false 'copyright-free' claims.",
+      ],
+    },
+  ],
+
+  verification_tiers: {
+    community_submitted:
+      "Present in the database, not yet vetted by anyone. Never returned by default.",
+    maintainer_verified:
+      "A maintainer listened to the whole track and applied this rubric. Attributed and dated.",
+    scholar_reviewed:
+      "A named person with scholarly standing signed off. Attributed and dated.",
+  },
+
+  accepted_licenses: {
+    CC0: "Public-domain dedication. No attribution required, though it is still good manners.",
+    "CC-BY": "Free reuse including commercial, attribution required.",
+    "CC-BY-SA": "As CC-BY, but derivative works must carry the same license. Note this before using it under a video you license differently.",
+    "public-domain": "Out of copyright, or never eligible for it.",
+    "author-permission":
+      "The rights holder gave explicit written permission. `permission_evidence` records how, so the claim stays auditable.",
+  },
+};
+
+/** Instrumentation values that satisfy the instrumentation clause. */
+export const CLEAN_INSTRUMENTATION = ["voice_only", "voice_duff", "duff_only"] as const;
+
+/** Verification tiers the API returns unless a caller opts into more. */
+export const TRUSTED_TIERS = ["maintainer_verified", "scholar_reviewed"] as const;
