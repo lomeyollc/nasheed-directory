@@ -606,11 +606,19 @@ def main() -> int:
         todo = [c for c in todo if c["source_platform"].startswith(args.source)]
         print(f"source filter {args.source!r}: {len(todo)} candidates")
 
-    # archive.org first by default: its hit rate for actual recitation and
-    # nasheed is far higher than a generic Commons audio search. When
-    # archive.org is rate-limiting — which it does, hard, after sustained use —
-    # pass --source wikimedia to work the pool that is still answering.
-    todo.sort(key=lambda c: 0 if c["source_platform"] == "archive.org" else 1)
+    # Order: candidates we can actually fetch first, then archive.org's higher
+    # hit rate, then the rest.
+    #
+    # The download_url term is not a nicety. archive.org items without one need
+    # a metadata call to resolve their audio, and while archive.org is
+    # rate-limiting that call fails every time — so those candidates sat at the
+    # front of the queue, consumed the entire --limit on retries, and the 55
+    # already-resolved tracks behind them were never reached. A whole run would
+    # screen nothing while looking like it was working.
+    todo.sort(key=lambda c: (
+        0 if c.get("download_url") else 1,
+        0 if c["source_platform"] == "archive.org" else 1,
+    ))
 
     # Shard BEFORE limiting, so each worker gets a distinct slice of the whole
     # pool rather than the same prefix of it.

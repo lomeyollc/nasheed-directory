@@ -286,6 +286,23 @@ def main() -> int:
         and r.get("instrumentation_guess") in ("voice_only", "voice_duff", "unclear")
         and (args.redo or not r.get("lyrics_english"))
     ]
+
+    # Only transcribe what could actually be published. Whisper costs about a
+    # minute a track, and without this the queue order sent it through a Dutch
+    # music-theatre trailer and a psychology-experiment stimulus before
+    # reaching a single nasheed — spending the expensive stage on tracks that
+    # publish.py rejects on sight for not being devotional audio at all.
+    sys.path.insert(0, str(Path(__file__).parent))
+    from publish import looks_islamic  # noqa: PLC0415
+
+    before = len(todo)
+    todo = [r for r in todo if looks_islamic(r)]
+    if before != len(todo):
+        print(f"skipping {before - len(todo)} tracks that are not devotional audio")
+
+    # Expanded archive.org album tracks first: measured 52 of 55 voice_only,
+    # against a Commons pool where most candidates are not devotional at all.
+    todo.sort(key=lambda r: 0 if r.get("parent_item") else 1)
     shard_index, shard_count = (int(x) for x in args.shard.split("/"))
     if shard_count > 1:
         todo = [r for i, r in enumerate(todo) if i % shard_count == shard_index]

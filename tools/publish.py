@@ -218,9 +218,20 @@ MUSIC_LABELS = ("music", "singing", "chant", "mantra", "choir", "vocal music", "
 
 
 def looks_islamic(row: dict[str, Any]) -> bool:
+    # `matched_term` is deliberately NOT consulted. It is the search term WE
+    # used, not a fact about the recording, and treating it as evidence is
+    # circular: Wikimedia's search ignores its query often enough that a 1929
+    # French chanson came back for "naat", inherited "naat" as its
+    # matched_term, and was then judged Islamic on the strength of our own
+    # question. It published, was removed, and published again before the
+    # reasoning error was spotted.
+    #
+    # `source_url` and `parent_item` DO count: those identifiers were chosen by
+    # whoever uploaded the recording, so "anasheed-bilal-al-batiniji" is the
+    # uploader's claim about their own file rather than an echo of our query.
     haystack = " ".join(
         str(row.get(f) or "") for f in
-        ("title", "artist", "description", "matched_term", "lyrics_english", "source_url")
+        ("title", "artist", "description", "lyrics_english", "source_url", "parent_item")
     ).lower()
     subjects = row.get("subjects")
     if subjects:
