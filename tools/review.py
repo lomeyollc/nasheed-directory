@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import mimetypes
 import unicodedata
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -127,6 +128,9 @@ LYRIC_FLAGS = {
         "(sound of gunfire", "(war sounds", "(marching",
     ],
     "media-foundation": [
+    "shabab", "al-shabab", "al shabab", "kataib", "al-kataib", "ribat", "ribati",
+    "sauti ya ribat", "mpeketoni", "harakat", "hijra", "muhajir", "amniyat",
+    "furqaan", "inspire", "rumiyah", "dabiq", "khorasan", "wilayat", "emirate",
         "bashair", "basha'ir", "munasiroon", "munasirun", "ajnad", "al-furqan",
         "furqan", "hayat media", "al-battar", "battar", "ashhad", "ghuraba",
         "itisam", "amaq",
@@ -151,6 +155,15 @@ LYRIC_FLAGS = {
         "conquer", "raid", "avenge", "revenge", "destroy them", "death to",
     ],
     "martyrdom": [
+        # Transliteration variants. whisper's medium model TRANSLITERATES Urdu
+        # rather than translating it — the first track it processed came back
+        # as "Khilafat-e-raama", which the English-only list would have missed
+        # while "khilafah" sat in it. Content screening only works if it reads
+        # the script the transcript is actually in.
+        "khilafat", "khilafa", "jehad", "jihaad", "shaheed", "shahadat",
+        "shuhada", "mujahid", "mujahideen", "mujahidin", "ghazwa", "ghazwah",
+        "qital", "qatl", "talwar", "tofang", "bandooq", "inteqam", "badla",
+        "lashkar", "jaish", "katiba", "fauj", "askari", "harb",
         "martyr", "martyrdom", "shahid", "sacrifice my life", "die for", "paradise awaits",
     ],
     "group-praise": [
@@ -179,12 +192,24 @@ def _normalise(text: str) -> str:
     return stripped.replace("'", "").replace("\u2019", "").replace("-", " ")
 
 
+def _matches(needle: str, haystack: str) -> bool:
+    """Short needles match on word boundaries, long ones as substrings.
+
+    Naive substring matching fires "war" inside "awwari" and "gun" inside
+    "begunah" — and transliterated Urdu is full of such collisions, so the
+    violence list lit up on devotional poetry. Long, distinctive terms like
+    "mujahideen" stay substring matches so that suffixed forms still catch."""
+    if len(needle) <= 5:
+        return re.search(rf"\b{re.escape(needle)}\b", haystack) is not None
+    return needle in haystack
+
+
 def lyric_flags(english: str) -> dict[str, list[str]]:
     low = _normalise(english)
     return {
         category: hits
         for category, words in LYRIC_FLAGS.items()
-        if (hits := [w for w in words if _normalise(w) in low])
+        if (hits := [w for w in words if _matches(_normalise(w), low)])
     }
 
 

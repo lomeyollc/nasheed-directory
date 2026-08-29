@@ -43,6 +43,12 @@ STATE = WORK / "published.json"
 
 BUCKET = "nasheed-audio"
 DB = "nasheed-directory"
+
+# The local binary, not `npx wrangler`. npx re-resolves the package on every
+# invocation, and publish calls it once per track — that overhead was the
+# single largest cost in a publish run, dwarfing both the transcode and the
+# upload itself.
+WRANGLER = str(ROOT / "node_modules" / ".bin" / "wrangler")
 BATCH = 10
 
 
@@ -52,7 +58,7 @@ def flush(statements: list[str], published: dict[str, Any], args: Any) -> bool:
         return False
     sql_file = WORK / "insert_tracks.sql"
     sql_file.write_text("\n".join(statements))
-    cmd = ["npx", "wrangler", "d1", "execute", DB, "--file", str(sql_file),
+    cmd = [WRANGLER, "d1", "execute", DB, "--file", str(sql_file),
            "--remote" if args.remote else "--local", "-y"]
     try:
         result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
@@ -144,7 +150,7 @@ def upload(local: Path, key: str, remote: bool, dry: bool) -> bool:
     if dry:
         print(f"    would upload -> r2://{BUCKET}/{key}")
         return True
-    cmd = ["npx", "wrangler", "r2", "object", "put", f"{BUCKET}/{key}",
+    cmd = [WRANGLER, "r2", "object", "put", f"{BUCKET}/{key}",
            "--file", str(local), "--content-type", "audio/mpeg"]
     cmd.append("--remote" if remote else "--local")
     try:
@@ -264,7 +270,15 @@ def auto_verifiable(row: dict[str, Any]) -> tuple[bool, str]:
     if row.get("lyrics_flags"):
         return False, f"lyric flags: {list(row['lyrics_flags'])}"
 
-    lyrics = (row.get("lyrics_english") or "").strip()
+    raw_lyrics = (row.get("lyrics_english") or "").strip()
+
+    # Strip whisper's bracketed annotations before judging whether we actually
+    # read the words. "[singing in foreign language]" is whisper telling us it
+    # FAILED to transcribe, and counting it as content cleared an al-Shabaab
+    # nasheed whose entire transcript was that phrase twice — long enough to
+    # pass the length check and varied enough to pass the repetition check.
+    lyrics = re.sub(r"[\[(][^\])]*[\])]", " ", raw_lyrics)
+    lyrics = re.sub(r"\s+", " ", lyrics).strip()
     low = lyrics.lower()
 
     # A structural rule rather than another keyword.

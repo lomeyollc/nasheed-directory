@@ -59,7 +59,25 @@ MODELS = Path(__file__).parent / "models"
 SCREENED = WORK / "screened.json"
 
 MODEL_NAME = "ggml-small.bin"
-MODEL_URL = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{MODEL_NAME}"
+
+
+def model_url(name: str) -> str:
+    return f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{name}"
+
+
+def is_unreadable(text: str | None) -> bool:
+    """True when whisper produced no actual words.
+
+    Its bracketed annotations — "[singing in foreign language]", "[Music]",
+    "[INAUDIBLE]" — are whisper reporting FAILURE, not content. Counting them
+    as lyrics cleared an al-Shabaab track whose whole transcript was that first
+    phrase twice: long enough to look substantial, varied enough to look
+    non-repetitive, and containing not one word anybody had read."""
+    if not text:
+        return True
+    stripped = re.sub(r"[\[(][^\])]*[\])]", " ", text)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return len(stripped) < 40
 
 # Whisper is slow and lyrics repeat. Two minutes is plenty to tell what a
 # nasheed is about, and caps the cost of a track that turns out to be an hour
@@ -79,6 +97,9 @@ MAX_SECONDS = 60
 # do, because the words are poetry and the studio ident is a brand. Whisper
 # picks the ident up precisely because it is spoken clearly at the start.
 MEDIA_FOUNDATIONS = [
+    "shabab", "al-shabab", "al shabab", "kataib", "al-kataib", "ribat", "ribati",
+    "sauti ya ribat", "mpeketoni", "harakat", "hijra", "muhajir", "amniyat",
+    "furqaan", "inspire", "rumiyah", "dabiq", "khorasan", "wilayat", "emirate",
     "bashair", "basha'ir", "bashā'ir", "البشائر",
     "munasiroon", "munasirun", "مناصرون",
     "ajnad", "أجناد",
@@ -124,6 +145,15 @@ CONTENT_FLAGS = {
         "conquer", "raid", "avenge", "revenge", "destroy them", "death to",
     ],
     "martyrdom": [
+        # Transliteration variants. whisper's medium model TRANSLITERATES Urdu
+        # rather than translating it — the first track it processed came back
+        # as "Khilafat-e-raama", which the English-only list would have missed
+        # while "khilafah" sat in it. Content screening only works if it reads
+        # the script the transcript is actually in.
+        "khilafat", "khilafa", "jehad", "jihaad", "shaheed", "shahadat",
+        "shuhada", "mujahid", "mujahideen", "mujahidin", "ghazwa", "ghazwah",
+        "qital", "qatl", "talwar", "tofang", "bandooq", "inteqam", "badla",
+        "lashkar", "jaish", "katiba", "fauj", "askari", "harb",
         "martyr", "martyrdom", "shahid", "sacrifice my life", "die for", "paradise awaits",
     ],
     "group-praise": [
@@ -137,13 +167,19 @@ CONTENT_FLAGS = {
 }
 
 
-def ensure_model() -> Path:
+def ensure_model(name: str = MODEL_NAME) -> Path:
     MODELS.mkdir(exist_ok=True)
-    path = MODELS / MODEL_NAME
-    if path.exists() and path.stat().st_size > 100_000_000:
+    path = MODELS / name
+    # Expected sizes, so a truncated download is not mistaken for a good one.
+    minimum = {"ggml-small.bin": 450_000_000, "ggml-medium.bin": 1_500_000_000}.get(name, 100_000_000)
+    if path.exists() and path.stat().st_size >= minimum:
         return path
-    print(f"downloading {MODEL_NAME} (~466 MB, one time) ...")
-    result = subprocess.run(["curl", "-sSL", "-o", str(path), MODEL_URL])
+    print(f"downloading {name} (one time) ...", flush=True)
+    # -C - resumes a partial file. The medium model is ~1.5 GB and a killed
+    # download left 729 MB behind that the size check below then rejected,
+    # so without resume every restart began again from zero.
+    result = subprocess.run(["curl", "-sSL", "-C", "-", "--retry", "5",
+                             "-o", str(path), model_url(name)])
     if result.returncode != 0 or not path.exists():
         print("model download failed", file=sys.stderr)
         raise SystemExit(1)
@@ -219,11 +255,23 @@ def _normalise(text: str) -> str:
     return stripped.replace("'", "").replace("\u2019", "").replace("-", " ")
 
 
+def _matches(needle: str, haystack: str) -> bool:
+    """Short needles match on word boundaries, long ones as substrings.
+
+    Naive substring matching fires "war" inside "awwari" and "gun" inside
+    "begunah" — and transliterated Urdu is full of such collisions, so the
+    violence list lit up on devotional poetry. Long, distinctive terms like
+    "mujahideen" stay substring matches so that suffixed forms still catch."""
+    if len(needle) <= 5:
+        return re.search(rf"\b{re.escape(needle)}\b", haystack) is not None
+    return needle in haystack
+
+
 def content_flags(english: str) -> dict[str, list[str]]:
     low = _normalise(english)
     found: dict[str, list[str]] = {}
     for category, words in CONTENT_FLAGS.items():
-        hits = [w for w in words if _normalise(w) in low]
+        hits = [w for w in words if _matches(_normalise(w), low)]
         if hits:
             found[category] = hits
     return found
@@ -266,6 +314,13 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--redo", action="store_true")
     parser.add_argument("--shard", default="0/1", help="i/n — disjoint slice for parallel workers")
+    parser.add_argument("--model", default="small",
+                        help="whisper model: small (fast) or medium (markedly better on sung "
+                             "Arabic and Urdu, where small returns '[singing in foreign language]')")
+    parser.add_argument("--only-failed", action="store_true",
+                        help="Re-do tracks whose transcript was only whisper annotations — i.e. "
+                             "whisper told us it could not read them, and we must not treat that "
+                             "as content having been checked.")
     args = parser.parse_args()
 
     if not shutil.which("whisper-cli"):
@@ -275,7 +330,8 @@ def main() -> int:
         print("No screened.json — run screen.py first.", file=sys.stderr)
         return 1
 
-    model = ensure_model()
+    model_file = f"ggml-{args.model}.bin"
+    model = ensure_model(model_file)
     rows = json.loads(SCREENED.read_text())
 
     # Only tracks a reviewer might actually accept. Transcribing something the
@@ -284,7 +340,9 @@ def main() -> int:
         r for r in rows
         if r.get("status") == "screened"
         and r.get("instrumentation_guess") in ("voice_only", "voice_duff", "unclear")
-        and (args.redo or not r.get("lyrics_english"))
+        and (args.redo
+             or (is_unreadable(r.get("lyrics_english")) if args.only_failed
+                 else not r.get("lyrics_english")))
     ]
 
     # Only transcribe what could actually be published. Whisper costs about a
@@ -341,7 +399,7 @@ def main() -> int:
         target["lyrics_language"] = language
         target["lyrics_english"] = english
         target["lyrics_flags"] = content_flags(english or "")
-        target["lyrics_model"] = MODEL_NAME
+        target["lyrics_model"] = model_file
 
         wav.unlink(missing_ok=True)
 
