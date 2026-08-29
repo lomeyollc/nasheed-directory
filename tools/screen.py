@@ -102,14 +102,31 @@ LABELS = {
 # every axis at once. Absolute per-frame confidence is the wrong instrument
 # for this; presence is what matters.
 MELODIC_FRAME_THRESHOLD = 0.08
-MELODIC_TRACK_RATIO = 0.015
-# A single unambiguous moment is enough. A track can be 99% solo voice and
-# still have four seconds of oud, and those four seconds disqualify it.
-MELODIC_PEAK_THRESHOLD = 0.35
-# Mean melodic energy across the whole track. Catches a quiet instrumental
-# bed that never peaks but is present throughout — the case ratio-of-frames
-# alone misses.
-MELODIC_MEAN_THRESHOLD = 0.006
+
+# Calibrated against the first real batch rather than guessed. Measured on
+# eleven analysed tracks, `melodic_ratio` separates cleanly by an order of
+# magnitude and the other signals do not:
+#
+#   Bach piano performance       0.703      Navy Band brass     0.772
+#   Kuwait anthem (instrumental) 0.611      chiptune            0.773
+#   genuine vocal-only nasheed   0.071      other plausibles    0.028-0.099
+#
+# The earlier 0.015 flagged all eleven, which made the verdict worthless —
+# a reviewer facing an unbroken wall of red learns to ignore it, which is
+# worse than no signal at all.
+MELODIC_TRACK_RATIO = 0.20
+
+# Mean melodic energy across the track. Same batch: instrumentals 0.085-0.274,
+# plausible candidates 0.0145-0.0296. Catches a quiet instrumental bed that
+# is present throughout but never dominates a frame.
+MELODIC_MEAN_THRESHOLD = 0.05
+
+# Peak is deliberately NOT a disqualifier. It was one, and the data says it
+# cannot be: peak ran 0.39-0.96 on plausible tracks and 0.49-0.96 on obvious
+# instrumentals — the two populations overlap almost completely, so any cut
+# either passes a Bach minuet or rejects a solo vocal. It is still recorded
+# and shown to the reviewer as evidence.
+MELODIC_PEAK_REPORT_ONLY = True
 
 PERCUSSION_FRAME_THRESHOLD = 0.15
 PERCUSSION_TRACK_RATIO = 0.02
@@ -143,6 +160,33 @@ IRRELEVANT = [
     "audiobook", "wikipedia article", "spoken wikipedia", "ll-q",  # Lingua Libre
     "voice of america", "radio broadcast", "news", "birdsong", "xc",  # xeno-canto
 ]
+
+
+# Phrases conventionally used in jihadi nasheeds. This genre is a large,
+# freely-reuploaded presence on public archives, and it defeats every other
+# check this pipeline has: it is overwhelmingly unaccompanied vocal, so it
+# sails through the instrumentation test looking like exactly what we want.
+#
+# These are a REASON TO LOOK, never a verdict. Every one of them also appears
+# innocently — "lions" is ordinary classical imagery, "ummah" and "fath" are
+# everyday religious vocabulary. The flag exists so a reviewer who does not
+# read Arabic is told to get the lyrics translated before accepting, rather
+# than approving a clean-sounding vocal track on the strength of its waveform.
+EXTREMIST_MARKERS = [
+    "أسود الله", "دولة الإسلام", "صليل الصوارم", "جهاد", "استشهاد", "مجاهد",
+    "قاعدة", "داعش", "كتائب", "غزوة", "شهداء",
+    "lions of", "islamic state", "clashing of the swords", "clanging of the swords",
+    "jihad", "mujahid", "mujahideen", "martyrdom", "caliphate", "khilafah",
+    "al-qaeda", "isis", "taliban", "shabaab", "ansar", "battalion", "raid on",
+]
+
+
+def extremism_flags(candidate: dict[str, Any]) -> list[str]:
+    """Marker phrases found in a candidate's own metadata, for the reviewer."""
+    haystack = " ".join(
+        str(candidate.get(f) or "") for f in ("title", "artist", "description", "uploader")
+    ).lower()
+    return [m for m in EXTREMIST_MARKERS if m.lower() in haystack]
 
 
 def is_relevant(candidate: dict[str, Any]) -> bool:
@@ -231,11 +275,24 @@ def resolve_download_url(candidate: dict[str, Any]) -> str | None:
     return None
 
 
+# Wikimedia's upload servers answer 429 to a request with no User-Agent, and
+# curl sends none by default. The first screening run failed to download 113
+# of 126 candidates for exactly this reason — and because the failure was a
+# rejected HTTP status rather than an exception, it looked like "these files
+# are gone" rather than "we are being refused". Wikimedia's User-Agent policy
+# asks for a contact address, so give a real one.
+USER_AGENT = (
+    "nasheed-directory/0.1 (https://github.com/lomeyollc/nasheed-directory; zakir@lomeyo.com)"
+)
+
+
 def download(url: str, dest: Path) -> bool:
     if dest.exists() and dest.stat().st_size > 10_000:
         return True
     result = subprocess.run(
-        ["curl", "-sS", "-L", "-m", "180", "--max-filesize", "80000000", "-o", str(dest), url],
+        ["curl", "-sS", "-L", "-m", "180", "--max-filesize", "80000000",
+         "--retry", "2", "--retry-delay", "3",
+         "-H", f"User-Agent: {USER_AGENT}", "-o", str(dest), url],
         capture_output=True,
         text=True,
     )
@@ -332,13 +389,27 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
 
     # Three independent ways to fail. Any one is enough: a sustained bed, a
     # scattering of flagged frames, or one unambiguous moment.
+    # Two tiers, on purpose. `melodic_reasons` disqualifies. `melodic_warnings`
+    # does not, but is shown to the reviewer anyway — the point is that a
+    # track can look clean on the numbers and still deserve a careful listen,
+    # and hiding that from a human is how a mistake gets made quietly.
     melodic_reasons = []
+    melodic_warnings = []
+
     if melodic_ratio > MELODIC_TRACK_RATIO:
-        melodic_reasons.append(f"flagged in {melodic_ratio:.1%} of frames")
-    if melodic_peak > MELODIC_PEAK_THRESHOLD:
-        melodic_reasons.append(f"peak confidence {melodic_peak:.2f}")
+        melodic_reasons.append(f"melodic content in {melodic_ratio:.1%} of frames")
+    elif melodic_ratio > MELODIC_TRACK_RATIO / 4:
+        melodic_warnings.append(f"some melodic content ({melodic_ratio:.1%} of frames)")
+
     if melodic_mean > MELODIC_MEAN_THRESHOLD:
-        melodic_reasons.append(f"mean energy {melodic_mean:.4f} across the track")
+        melodic_reasons.append(f"mean melodic energy {melodic_mean:.4f} across the whole track")
+    elif melodic_mean > MELODIC_MEAN_THRESHOLD / 4:
+        melodic_warnings.append(f"low but steady melodic energy ({melodic_mean:.4f})")
+
+    if melodic_peak > 0.6:
+        melodic_warnings.append(
+            f"a moment scored {melodic_peak:.2f} for an instrument — check the flagged timestamps"
+        )
 
     # Belt and braces: if a melodic class appears in the track's own top
     # labels at all, say so. The first run produced a `voice_only` verdict on
@@ -352,9 +423,14 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
         if buckets["_names"][i] in melodic_names and float(s) > 0.01
     ]
     if top_melodic:
-        melodic_reasons.append(
-            "melodic classes in top labels: " + ", ".join(n for n, _ in top_melodic)
-        )
+        names = ", ".join(f"{n} {v}" for n, v in top_melodic)
+        # Only disqualifying when a melodic class is genuinely prominent.
+        # Below that it is a warning: nearly any recording has some instrument
+        # class in its top twelve at a trivial score.
+        if any(v > 0.05 for _, v in top_melodic):
+            melodic_reasons.append(f"prominent melodic classes: {names}")
+        else:
+            melodic_warnings.append(f"melodic classes present in top labels: {names}")
 
     has_melodic = bool(melodic_reasons)
     has_percussion = percussion_ratio > PERCUSSION_TRACK_RATIO
@@ -389,6 +465,7 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
         "clean_score": clean_score,
         "needs_human_percussion_check": bool(has_percussion),
         "melodic_reasons": melodic_reasons,
+        "melodic_warnings": melodic_warnings,
         "melodic_peak": round(melodic_peak, 4),
         "melodic_mean": round(melodic_mean, 5),
         "top_melodic_labels": top_melodic,
@@ -402,7 +479,6 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
         "thresholds": {
             "melodic_frame": MELODIC_FRAME_THRESHOLD,
             "melodic_track_ratio": MELODIC_TRACK_RATIO,
-            "melodic_peak": MELODIC_PEAK_THRESHOLD,
             "melodic_mean": MELODIC_MEAN_THRESHOLD,
             "percussion_frame": PERCUSSION_FRAME_THRESHOLD,
             "percussion_track_ratio": PERCUSSION_TRACK_RATIO,
@@ -503,6 +579,7 @@ def main() -> int:
             **candidate,
             "key": key,
             "status": "screened",
+            "extremism_flags": extremism_flags(candidate),
             "download_url": url,
             "local_audio": str(raw.name),
             "loudness_lufs": measure_loudness(raw),

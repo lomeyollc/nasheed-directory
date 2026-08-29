@@ -70,6 +70,18 @@ export const RUBRIC: {
       ],
     },
     {
+      id: "extremist-content",
+      rule: "No content promoting violence, armed struggle, martyrdom operations, or any extremist group.",
+      checked_by: "human_review",
+      disqualifies: [
+        "Jihadi nasheeds. This genre is a real and large presence on public archives, it is very often unaccompanied vocal (so it passes every instrumentation check cleanly), and it is frequently re-uploaded with a Creative Commons licence attached by someone who had no right to attach one.",
+        "Praise of any armed group, its leaders, or its fighters.",
+        "Calls to violence, glorification of killing, or martyrdom-operation themes.",
+        "Recordings distributed by, or produced by, a group under international sanction.",
+        "Titles and refrains that are conventional markers of the genre — for example 'lions of' a group, 'the state', or 'clashing of swords'. A marker is a reason to check, not a verdict: the same words appear innocently in classical poetry.",
+      ],
+    },
+    {
       id: "instrument-imitation",
       rule: "Vocal effects are permitted; vocal imitation of instruments is not.",
       checked_by: "human_review",

@@ -246,6 +246,18 @@ function render() {
       ? '<div class="box warn"><b>Licence check</b>The uploader and the credited artist look different. On public archives that usually means somebody re-uploaded a commercial recording and ticked a Creative Commons box they had no right to tick. Verify before accepting.</div>'
       : ''}
 
+    ${(t.extremism_flags || []).length ? `<div class="box bad">
+      <b>Stop — get the lyrics translated before you accept this</b>
+      This track's metadata contains phrases conventionally used in jihadi nasheeds:
+      <b style="display:inline;text-transform:none;letter-spacing:0;color:#f85149">${t.extremism_flags.map(esc).join(', ')}</b>.
+      <div style="margin-top:8px;font-size:12px;color:#8b949e">
+        That genre is almost entirely unaccompanied vocal, so it passes every instrumentation
+        check looking exactly like what this catalog wants. These words also appear innocently in
+        classical poetry — this is a reason to check, not a verdict. If you cannot read the lyrics,
+        reject it. An unverified accept here is far more costly than a wrongly rejected track.
+      </div>
+      </div>` : ''}
+
     <audio id="player" controls src="/audio/${esc(t.local_audio || '')}"></audio>
 
     <div class="grid">
@@ -271,6 +283,15 @@ function render() {
       <div style="margin-top:8px;font-size:12px;color:#8b949e">
         The detector is wrong often enough in both directions that it does not get the last word.
         Reverb and layered vocals can read as an organ; a quiet oud can read as nothing. Judge by ear.
+      </div>
+      </div>` : ''}
+
+    ${(t.melodic_warnings || []).length ? `<div class="box warn"><b>Worth a careful listen</b>
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:13px">
+        ${t.melodic_warnings.map(r => '<li>' + esc(r) + '</li>').join('')}
+      </ul>
+      <div style="margin-top:8px;font-size:12px;color:#8b949e">
+        Not enough to disqualify on the numbers, but enough that the detector noticed something.
       </div>
       </div>` : ''}
 
