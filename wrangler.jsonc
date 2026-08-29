@@ -2,7 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "nasheed-directory",
   "main": "src/worker/index.ts",
-  "compatibility_date": "2026-08-29",
+  "compatibility_date": "2026-08-18",
   "compatibility_flags": ["nodejs_compat"],
 
   // Static frontend (Vite build output). Any route that isn't a static file
@@ -33,6 +33,11 @@
   "r2_buckets": [{ "binding": "AUDIO", "bucket_name": "nasheed-audio" }],
 
   "observability": { "enabled": true },
+
+  // Custom domain. Cloudflare provisions the DNS record and certificate for
+  // this hostname automatically on deploy, because lomeyo.com is already a
+  // zone on this account.
+  "routes": [{ "pattern": "nasheed.lomeyo.com", "custom_domain": true }],
 
   "vars": { "APP_URL": "https://nasheed.lomeyo.com" }
 
