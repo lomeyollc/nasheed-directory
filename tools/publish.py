@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -42,6 +43,28 @@ STATE = WORK / "published.json"
 
 BUCKET = "nasheed-audio"
 DB = "nasheed-directory"
+BATCH = 10
+
+
+def flush(statements: list[str], published: dict[str, Any], args: Any) -> bool:
+    """Write the pending rows to D1 and record them. Returns True on success."""
+    if not statements or args.dry_run:
+        return False
+    sql_file = WORK / "insert_tracks.sql"
+    sql_file.write_text("\n".join(statements))
+    cmd = ["npx", "wrangler", "d1", "execute", DB, "--file", str(sql_file),
+           "--remote" if args.remote else "--local", "-y"]
+    try:
+        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("    ! d1 execute timed out; rows kept for the next flush")
+        return False
+    if result.returncode != 0:
+        print(f"    ! d1 execute failed: {result.stderr[:400]}")
+        return False
+    STATE.write_text(json.dumps(published, indent=1))
+    print(f"    .. committed {len(statements)} rows ({len(published)} total)", flush=True)
+    return True
 
 
 def sql_str(value: Any) -> str:
@@ -84,7 +107,7 @@ def transcode(src: Path, dest: Path) -> bool:
         ["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
          "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
          "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", str(dest)],
-        capture_output=True,
+        capture_output=True, timeout=300,
     )
     return result.returncode == 0 and dest.exists()
 
@@ -124,7 +147,14 @@ def upload(local: Path, key: str, remote: bool, dry: bool) -> bool:
     cmd = ["npx", "wrangler", "r2", "object", "put", f"{BUCKET}/{key}",
            "--file", str(local), "--content-type", "audio/mpeg"]
     cmd.append("--remote" if remote else "--local")
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
+    try:
+        # Without a timeout a single hung upload stalls the entire run with no
+        # output and no way to tell it apart from slow progress. That happened:
+        # 27 tracks transcoded, then nothing, indefinitely.
+        result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, timeout=240)
+    except subprocess.TimeoutExpired:
+        print("    ! upload timed out")
+        return False
     if result.returncode != 0:
         print(f"    ! upload failed: {result.stderr.strip()[:300]}")
         return False
@@ -157,8 +187,65 @@ AUTO_MIN_LYRICS_CHARS = 40
 AUTO_MIN_DURATION = 20.0
 
 
+# Positive evidence that a recording belongs in THIS catalog.
+#
+# Every rule before this one asked "is there anything wrong with this track".
+# That is the wrong question for a directory, and asking only that put a train
+# station announcement, a Java lecture, two Spanish interviews and three 1930s
+# French chansons into a nasheed catalog. Each passed cleanly: a spoken
+# announcement is unaccompanied voice, and none of them tripped a content flag,
+# because there was nothing objectionable in them — they simply were not
+# nasheeds.
+#
+# So the gate is inverted. A track must show it BELONGS, not merely fail to
+# show it does not.
+ISLAMIC_MARKERS = [
+    "nasheed", "nasheeds", "anasheed", "anashid", "nashid", "inshad", "munshid",
+    "naat", "hamd", "qasida", "qaseeda", "madih", "burda", "mawlid", "milad",
+    "salawat", "salawaat", "durood", "takbir", "tahmid", "tasbih", "tarteel",
+    "adhan", "azan", "iqamah", "dhikr", "zikr", "quran", "qur'an", "koran",
+    "surah", "sura", "ayah", "tilawa", "tilawah", "recitation", "dua", "duaa",
+    "munajat", "ilahi", "kaside", "islam", "islamic", "muslim", "allah",
+    "muhammad", "mohammed", "rasul", "prophet", "sufi", "ramadan", "eid",
+    "hajj", "umrah", "makkah", "mecca", "madinah", "medina", "بسم", "الله",
+    "نشيد", "أناشيد", "قرآن", "إسلام", "محمد", "دعاء", "ذكر",
+]
+
+# Spoken word is not background music, whatever language it is in. AudioSet
+# separates these cleanly and we were ignoring it.
+SPEECH_LABELS = ("speech", "conversation", "narration", "monologue", "babbling")
+MUSIC_LABELS = ("music", "singing", "chant", "mantra", "choir", "vocal music", "a capella")
+
+
+def looks_islamic(row: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        str(row.get(f) or "") for f in
+        ("title", "artist", "description", "matched_term", "lyrics_english", "source_url")
+    ).lower()
+    subjects = row.get("subjects")
+    if subjects:
+        haystack += " " + (" ".join(subjects) if isinstance(subjects, list) else str(subjects)).lower()
+    return any(m in haystack for m in ISLAMIC_MARKERS)
+
+
+def is_sung(row: dict[str, Any]) -> bool:
+    """Music and singing must outweigh speech in the track's own top labels."""
+    music = speech = 0.0
+    for name, score in row.get("top_labels") or []:
+        low = str(name).lower()
+        if any(k in low for k in MUSIC_LABELS):
+            music = max(music, float(score))
+        if any(k in low for k in SPEECH_LABELS):
+            speech = max(speech, float(score))
+    return music > speech and music >= 0.12
+
+
 def auto_verifiable(row: dict[str, Any]) -> tuple[bool, str]:
     """Returns (ok, reason-it-failed)."""
+    if not looks_islamic(row):
+        return False, "no evidence this is Islamic devotional audio"
+    if not is_sung(row):
+        return False, "speech, not song — spoken word is not background music"
     if row.get("instrumentation_guess") != "voice_only":
         return False, f"not voice_only ({row.get('instrumentation_guess')}) — percussion needs an ear"
     if row.get("extremism_flags"):
@@ -216,6 +303,43 @@ def auto_verifiable(row: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+class AlreadyRunning(Exception):
+    pass
+
+
+def acquire_lock() -> Path:
+    """
+    Refuse to run two publishers at once.
+
+    publish.py reads published.json at the start and writes it at the end, so
+    two concurrent runs both see the same "already published" set, both upload
+    the same audio, and both try to insert the same slugs. The unique index
+    then fails the second batch — after it has already spent the upload
+    bandwidth. This became reachable as soon as fill.sh started running a
+    publish pass while a manual one might also be in flight.
+
+    O_EXCL on a pid file is enough here: one machine, cooperating processes.
+    A stale lock from a killed run is detected by checking whether that pid is
+    still alive, rather than requiring a human to delete a file.
+    """
+    lock = WORK / "publish.lock"
+    if lock.exists():
+        try:
+            pid = int(lock.read_text().strip())
+            os.kill(pid, 0)
+        except (ValueError, ProcessLookupError):
+            lock.unlink(missing_ok=True)  # stale; the owner is gone
+        except PermissionError:
+            raise AlreadyRunning(f"publish.py already running as pid {lock.read_text().strip()}")
+        else:
+            raise AlreadyRunning(f"publish.py already running as pid {pid}")
+
+    fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    os.write(fd, str(os.getpid()).encode())
+    os.close(fd)
+    return lock
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--remote", action="store_true", help="Production D1 and R2")
@@ -228,6 +352,12 @@ def main() -> int:
     if not SCREENED.exists():
         print("Need screened.json — run screen.py first.", file=sys.stderr)
         return 1
+
+    try:
+        lock = acquire_lock()
+    except AlreadyRunning as exc:
+        print(f"{exc} — not starting a second publisher.", file=sys.stderr)
+        return 0 if args.dry_run else 1
     if not DECISIONS.exists() and not args.auto:
         print("Need decisions.json — run review.py, or pass --auto.", file=sys.stderr)
         return 1
@@ -363,28 +493,32 @@ def main() -> int:
         )
 
         published[key] = {"slug": slug, "r2_key": r2_key, "sha256": digest, "published_at": now}
-        print(f"    -> {slug} ({instrumentation})")
+        print(f"    -> {slug} ({instrumentation})", flush=True)
+
+        # Flush every BATCH tracks. A run over a large queue takes long enough
+        # that it WILL be interrupted, and writing state only at the end meant
+        # an hour of transcoding and uploading vanished — the audio was already
+        # in R2, but nothing recorded it, so the next run redid all of it.
+        if len(statements) >= BATCH:
+            if flush(statements, published, args):
+                statements.clear()
 
     if not statements:
         print("\nNothing published.")
+        lock.unlink(missing_ok=True)
         return 0
-
-    sql_file = WORK / "insert_tracks.sql"
-    sql_file.write_text("\n".join(statements))
-    print(f"\n{len(statements)} rows -> {sql_file}")
 
     if args.dry_run:
-        print("Dry run: not executing against D1.")
+        print(f"\nDry run: {len(statements)} rows would be inserted.")
+        lock.unlink(missing_ok=True)
         return 0
 
-    cmd = ["npx", "wrangler", "d1", "execute", DB, "--file", str(sql_file),
-           "--remote" if args.remote else "--local", "-y"]
-    result = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    if result.returncode != 0:
-        print(f"! d1 execute failed:\n{result.stderr[:1500]}", file=sys.stderr)
+    if statements and not flush(statements, published, args):
+        print("! final flush failed", file=sys.stderr)
+        lock.unlink(missing_ok=True)
         return 1
 
-    STATE.write_text(json.dumps(published, indent=1))
+    lock.unlink(missing_ok=True)
     print(f"Published {len(statements)} tracks to {'production' if args.remote else 'local'} D1.")
     return 0
 
