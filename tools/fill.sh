@@ -24,9 +24,12 @@ cd "$(dirname "$0")/.."
 
 TARGET="${1:-100}"
 REMOTE="${2:-}"
+# Optional: --source wikimedia, to work a pool that is still answering when
+# another one is rate-limiting.
+SOURCE="${3:-}"
 VENV="tools/.venv/bin/python"
-SCREEN_WORKERS=4
-TRANSCRIBE_WORKERS=2
+SCREEN_WORKERS=6
+TRANSCRIBE_WORKERS=3
 
 published_count() {
   python3 - <<'PY'
@@ -50,15 +53,21 @@ while true; do
     break
   fi
 
-  # 1. Multiply the candidate pool. Bounded per round so a slow metadata
-  #    endpoint cannot stall the loop before any screening happens.
+  # 1. Multiply the candidate pool — but only if archive.org is actually
+  #    answering. It rate-limits to a hard timeout after sustained use, and an
+  #    expansion stage that cannot reach it burns the whole round doing nothing
+  #    while the screening pool sits untouched. Probe once, cheaply, and skip.
   echo "--- expanding albums ---"
-  timeout 900 python3 tools/expand.py --limit 60 2>&1 | tail -3
+  if curl -sS -m 12 -o /dev/null "https://archive.org/metadata/nasa" 2>/dev/null; then
+    timeout 900 python3 tools/expand.py --limit 60 2>&1 | tail -3
+  else
+    echo "  archive.org not responding — skipping expansion this round"
+  fi
 
   # 2. Screen, several workers wide on disjoint shards.
   echo "--- screening ---"
   for i in $(seq 0 $((SCREEN_WORKERS - 1))); do
-    timeout 1800 "$VENV" tools/screen.py --shard "$i/$SCREEN_WORKERS" --limit 120 \
+    timeout 1800 "$VENV" tools/screen.py $SOURCE --shard "$i/$SCREEN_WORKERS" --limit 150 \
       > "tools/work/fill-screen-$i.log" 2>&1 &
   done
   wait
@@ -67,7 +76,7 @@ while true; do
   # 3. Transcribe whatever screening newly called voice_only.
   echo "--- transcribing ---"
   for i in $(seq 0 $((TRANSCRIBE_WORKERS - 1))); do
-    timeout 1800 python3 tools/transcribe.py --shard "$i/$TRANSCRIBE_WORKERS" --limit 60 \
+    timeout 1800 python3 tools/transcribe.py --shard "$i/$TRANSCRIBE_WORKERS" --limit 80 \
       > "tools/work/fill-transcribe-$i.log" 2>&1 &
   done
   wait

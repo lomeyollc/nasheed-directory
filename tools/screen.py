@@ -575,6 +575,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="0 = all")
     parser.add_argument("--redo", action="store_true", help="Re-analyse already-screened items")
     parser.add_argument("--no-filter", action="store_true", help="Skip the relevance gate")
+    parser.add_argument("--source", default="", help="only candidates from this platform prefix")
     parser.add_argument("--shard", default="0/1",
                         help="i/n — take only candidates where index %% n == i. Lets several "
                              "workers run at once on disjoint slices instead of racing for the "
@@ -601,9 +602,14 @@ def main() -> int:
         todo = [c for c in todo if is_relevant(c)]
         print(f"relevance gate: {before} -> {len(todo)} ({before - len(todo)} skipped as off-topic)")
 
-    # archive.org first: its hit rate for actual recitation and nasheed is far
-    # higher than a generic Commons audio search, so a partial run still
-    # produces a usable review queue.
+    if args.source:
+        todo = [c for c in todo if c["source_platform"].startswith(args.source)]
+        print(f"source filter {args.source!r}: {len(todo)} candidates")
+
+    # archive.org first by default: its hit rate for actual recitation and
+    # nasheed is far higher than a generic Commons audio search. When
+    # archive.org is rate-limiting — which it does, hard, after sustained use —
+    # pass --source wikimedia to work the pool that is still answering.
     todo.sort(key=lambda c: 0 if c["source_platform"] == "archive.org" else 1)
 
     # Shard BEFORE limiting, so each worker gets a distinct slice of the whole
