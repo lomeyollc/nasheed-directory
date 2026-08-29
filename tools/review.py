@@ -51,17 +51,26 @@ DECISIONS = WORK / "decisions.json"
 
 
 def load_screened() -> list[dict[str, Any]]:
+    """
+    Every successfully screened track, best candidates first.
+
+    An earlier version dropped everything the detector called `has_melodic`,
+    on the reasoning that a reviewer's time should go to uncertain cases. That
+    was wrong, and the first real run showed why: tuned loosely, the detector
+    passed a track with piano in its own top labels; tuned tightly enough to
+    catch that, it rejected a genuine unaccompanied vocal nasheed. At no
+    setting was it good enough to be the last word.
+
+    So the detector RANKS rather than GATES. Nothing is hidden from the
+    reviewer; the cleanest candidates simply come first, and flagged ones
+    arrive with the evidence attached. A wrong guess now costs a keystroke
+    instead of silently losing a good track from the catalog forever.
+    """
     if not SCREENED.exists():
         return []
-    rows = json.loads(SCREENED.read_text())
-    # Only tracks that actually screened, and never ones the detector already
-    # rejected outright — a reviewer's time goes to the genuinely uncertain
-    # cases, which is the entire point of having a screening stage.
-    return [
-        r
-        for r in rows
-        if r.get("status") == "screened" and r.get("instrumentation_guess") != "has_melodic"
-    ]
+    rows = [r for r in json.loads(SCREENED.read_text()) if r.get("status") == "screened"]
+    rows.sort(key=lambda r: -float(r.get("clean_score") or 0))
+    return rows
 
 
 def load_decisions() -> dict[str, dict[str, Any]]:
@@ -250,9 +259,20 @@ function render() {
       <div class="box"><b>Length</b>${fmt(t.duration_seconds)}</div>
       <div class="box"><b>Loudness</b>${t.loudness_lufs != null ? t.loudness_lufs.toFixed(1) + ' LUFS' : '—'}</div>
       <div class="box"><b>Detector says</b>${esc(t.instrumentation_guess)}</div>
+      <div class="box"><b>Clean score</b>${(t.clean_score ?? 0).toFixed(2)}</div>
     </div>
 
     ${perc ? '<div class="box warn"><b>Listen for this</b>AudioSet has no class for the duff, so a frame drum and a drum kit look identical to the detector. Percussion was heard here — decide by ear whether it is a duff.</div>' : ''}
+
+    ${(t.melodic_reasons || []).length ? `<div class="box bad"><b>Detector flagged a melodic instrument because</b>
+      <ul style="margin:4px 0 0 16px;padding:0;font-size:13px">
+        ${t.melodic_reasons.map(r => '<li>' + esc(r) + '</li>').join('')}
+      </ul>
+      <div style="margin-top:8px;font-size:12px;color:#8b949e">
+        The detector is wrong often enough in both directions that it does not get the last word.
+        Reverb and layered vocals can read as an organ; a quiet oud can read as nothing. Judge by ear.
+      </div>
+      </div>` : ''}
 
     ${(t.melodic_segments || []).length ? `<div class="box bad"><b>Detector heard an instrument at</b>
       ${t.melodic_segments.map(s => `<span class="seg" onclick="seek(${s[0]})">${fmt(s[0])}–${fmt(s[1])}</span>`).join('')}

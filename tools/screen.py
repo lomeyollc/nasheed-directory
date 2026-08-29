@@ -87,17 +87,82 @@ LABELS = {
     ],
 }
 
-# A frame counts as containing an instrument at this score. Set low on
-# purpose: see the false-positive note in the docstring.
-MELODIC_FRAME_THRESHOLD = 0.20
-# Share of frames that must be flagged before the whole track is called
-# instrumental. A stray 1-second flag on an otherwise clean recording is
-# usually a detector artefact, not an oud.
-MELODIC_TRACK_RATIO = 0.06
-PERCUSSION_FRAME_THRESHOLD = 0.25
-PERCUSSION_TRACK_RATIO = 0.04
+# Thresholds.
+#
+# These started much higher and were lowered after the first real run, which
+# labelled a track `voice_only` while "piano", "electric piano" and "keyboard"
+# all sat in its own top labels. That is the exact failure this stage exists
+# to prevent, so the numbers are now set where a false alarm is cheap and a
+# miss is not.
+#
+# The reason the first numbers failed is worth recording: YAMNet's generic
+# "Music" class swamps everything (0.74 on a solo vocal nasheed) while the
+# specific classes it should imply — "Singing", "Chant" — stay near 0.02. So
+# any rule phrased as "a specific class must be confident" under-fires on
+# every axis at once. Absolute per-frame confidence is the wrong instrument
+# for this; presence is what matters.
+MELODIC_FRAME_THRESHOLD = 0.08
+MELODIC_TRACK_RATIO = 0.015
+# A single unambiguous moment is enough. A track can be 99% solo voice and
+# still have four seconds of oud, and those four seconds disqualify it.
+MELODIC_PEAK_THRESHOLD = 0.35
+# Mean melodic energy across the whole track. Catches a quiet instrumental
+# bed that never peaks but is present throughout — the case ratio-of-frames
+# alone misses.
+MELODIC_MEAN_THRESHOLD = 0.006
 
-DETECTOR_VERSION = "yamnet-1/threshold-0.20"
+PERCUSSION_FRAME_THRESHOLD = 0.15
+PERCUSSION_TRACK_RATIO = 0.02
+
+# Voice is scored generously in the other direction: we are not trying to
+# prove voice is present, only to describe what is there for the reviewer.
+VOICE_FRAME_THRESHOLD = 0.08
+VOICE_TRACK_RATIO = 0.05
+
+DETECTOR_VERSION = "yamnet-1/v2-conservative"
+
+
+# Wikimedia Commons full-text search ignores the query terms far more often
+# than its API suggests — a search for "duff" returned a 1920 dance-orchestra
+# recording, and "dhikr" returned a US presidential address. Downloading and
+# analysing those costs minutes each for a guaranteed reject, so candidates
+# are gated on their own text before any bytes are fetched.
+RELEVANT = [
+    "nasheed", "anasheed", "nashid", "naat", "hamd", "qasida", "madih", "burda",
+    "mawlid", "salawat", "salawaat", "takbir", "tahmid", "tasbih", "adhan", "azan",
+    "dhikr", "zikr", "islam", "muslim", "quran", "qur'an", "allah", "muhammad",
+    "arabic", "sufi", "chant", "chanting", "a cappella", "acapella", "vocal",
+    "voice", "singing", "hymn", "prayer", "recitation", "duff", "daf", "bendir",
+    "frame drum", "tambour", "percussion", "drum",
+]
+
+# Words that mean "this is speech, not music" — pronunciation clips, lectures
+# and interviews dominate Commons audio and none of them are background music.
+IRRELEVANT = [
+    "pronunciation", "interview", "lecture", "speech by", "address", "podcast",
+    "audiobook", "wikipedia article", "spoken wikipedia", "ll-q",  # Lingua Libre
+    "voice of america", "radio broadcast", "news", "birdsong", "xc",  # xeno-canto
+]
+
+
+def is_relevant(candidate: dict[str, Any]) -> bool:
+    """Cheap text gate applied before download. Deliberately generous: it is
+    here to skip the obviously-wrong, not to make an editorial judgement."""
+    haystack = " ".join(
+        str(candidate.get(field) or "")
+        for field in ("title", "artist", "description", "matched_term")
+    ).lower()
+    tags = candidate.get("tags") or []
+    subjects = candidate.get("subjects") or []
+    for extra in (tags, subjects):
+        if isinstance(extra, list):
+            haystack += " " + " ".join(str(x) for x in extra).lower()
+        elif extra:
+            haystack += " " + str(extra).lower()
+
+    if any(word in haystack for word in IRRELEVANT):
+        return False
+    return any(word in haystack for word in RELEVANT)
 
 
 def load_yamnet():
@@ -257,34 +322,76 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
     percussion_frames = percussion > PERCUSSION_FRAME_THRESHOLD
 
     melodic_ratio = float(melodic_frames.mean()) if len(melodic_frames) else 0.0
+    melodic_peak = float(melodic.max()) if len(melodic) else 0.0
+    melodic_mean = float(melodic.mean()) if len(melodic) else 0.0
     percussion_ratio = float(percussion_frames.mean()) if len(percussion_frames) else 0.0
-    voice_ratio = float((voice > 0.20).mean()) if len(voice) else 0.0
+    voice_ratio = float((voice > VOICE_FRAME_THRESHOLD).mean()) if len(voice) else 0.0
 
     mean_scores = scores.mean(axis=0)
     top = sorted(enumerate(mean_scores), key=lambda kv: -kv[1])[:12]
 
-    has_melodic = melodic_ratio > MELODIC_TRACK_RATIO
+    # Three independent ways to fail. Any one is enough: a sustained bed, a
+    # scattering of flagged frames, or one unambiguous moment.
+    melodic_reasons = []
+    if melodic_ratio > MELODIC_TRACK_RATIO:
+        melodic_reasons.append(f"flagged in {melodic_ratio:.1%} of frames")
+    if melodic_peak > MELODIC_PEAK_THRESHOLD:
+        melodic_reasons.append(f"peak confidence {melodic_peak:.2f}")
+    if melodic_mean > MELODIC_MEAN_THRESHOLD:
+        melodic_reasons.append(f"mean energy {melodic_mean:.4f} across the track")
+
+    # Belt and braces: if a melodic class appears in the track's own top
+    # labels at all, say so. The first run produced a `voice_only` verdict on
+    # a track whose top labels listed piano, electric piano and keyboard —
+    # every ratio was under threshold while the answer was sitting in plain
+    # sight in the label list.
+    melodic_names = {buckets["_names"][i] for i in buckets["melodic"]}
+    top_melodic = [
+        [buckets["_names"][i], round(float(s), 4)]
+        for i, s in top
+        if buckets["_names"][i] in melodic_names and float(s) > 0.01
+    ]
+    if top_melodic:
+        melodic_reasons.append(
+            "melodic classes in top labels: " + ", ".join(n for n, _ in top_melodic)
+        )
+
+    has_melodic = bool(melodic_reasons)
     has_percussion = percussion_ratio > PERCUSSION_TRACK_RATIO
 
     if has_melodic:
         guess = "has_melodic"
-    elif has_percussion and voice_ratio > 0.10:
+    elif has_percussion and voice_ratio > VOICE_TRACK_RATIO:
         # Voice plus percussion. Could be voice+duff (fine) or voice+drum kit
         # (not fine) — the detector cannot tell, so this is a question for a
         # human, flagged as such rather than guessed.
         guess = "voice_duff"
     elif has_percussion:
         guess = "duff_only"
-    elif voice_ratio > 0.10:
+    elif voice_ratio > VOICE_TRACK_RATIO:
         guess = "voice_only"
     else:
         # Neither voice nor percussion above threshold: usually near-silence,
         # field recording, or something the classifier had no opinion on.
         guess = "unclear"
 
+    # `clean_score`: higher means more likely to be genuinely instrument-free.
+    # review.py sorts on this so a human meets the best candidates first,
+    # rather than the detector deciding alone what a human ever sees.
+    clean_score = round(
+        max(0.0, 1.0 - (melodic_ratio * 3) - (melodic_peak * 0.5) - (melodic_mean * 20))
+        + min(voice_ratio, 0.5),
+        4,
+    )
+
     return {
         "instrumentation_guess": guess,
+        "clean_score": clean_score,
         "needs_human_percussion_check": bool(has_percussion),
+        "melodic_reasons": melodic_reasons,
+        "melodic_peak": round(melodic_peak, 4),
+        "melodic_mean": round(melodic_mean, 5),
+        "top_melodic_labels": top_melodic,
         "melodic_ratio": round(melodic_ratio, 4),
         "percussion_ratio": round(percussion_ratio, 4),
         "voice_ratio": round(voice_ratio, 4),
@@ -295,6 +402,8 @@ def analyse(wav: Path, model, buckets: dict[str, list[int]]) -> dict[str, Any]:
         "thresholds": {
             "melodic_frame": MELODIC_FRAME_THRESHOLD,
             "melodic_track_ratio": MELODIC_TRACK_RATIO,
+            "melodic_peak": MELODIC_PEAK_THRESHOLD,
+            "melodic_mean": MELODIC_MEAN_THRESHOLD,
             "percussion_frame": PERCUSSION_FRAME_THRESHOLD,
             "percussion_track_ratio": PERCUSSION_TRACK_RATIO,
         },
@@ -322,6 +431,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0, help="0 = all")
     parser.add_argument("--redo", action="store_true", help="Re-analyse already-screened items")
+    parser.add_argument("--no-filter", action="store_true", help="Skip the relevance gate")
     args = parser.parse_args()
 
     if not CANDIDATES.exists():
@@ -338,6 +448,17 @@ def main() -> int:
     buckets["_names"] = class_names  # type: ignore[assignment]
 
     todo = [c for c in candidates if f"{c['source_platform']}:{c['source_id']}" not in done]
+
+    if not args.no_filter:
+        before = len(todo)
+        todo = [c for c in todo if is_relevant(c)]
+        print(f"relevance gate: {before} -> {len(todo)} ({before - len(todo)} skipped as off-topic)")
+
+    # archive.org first: its hit rate for actual recitation and nasheed is far
+    # higher than a generic Commons audio search, so a partial run still
+    # produces a usable review queue.
+    todo.sort(key=lambda c: 0 if c["source_platform"] == "archive.org" else 1)
+
     if args.limit:
         todo = todo[: args.limit]
 
