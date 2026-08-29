@@ -64,7 +64,7 @@ MODEL_URL = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{MODEL_N
 # Whisper is slow and lyrics repeat. Two minutes is plenty to tell what a
 # nasheed is about, and caps the cost of a track that turns out to be an hour
 # long lecture.
-MAX_SECONDS = 120
+MAX_SECONDS = 60
 
 # Content that disqualifies under the rubric, phrased as things that show up in
 # an English translation. Same principle as the title markers in screen.py:
@@ -251,6 +251,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--redo", action="store_true")
+    parser.add_argument("--shard", default="0/1", help="i/n — disjoint slice for parallel workers")
     args = parser.parse_args()
 
     if not shutil.which("whisper-cli"):
@@ -271,6 +272,10 @@ def main() -> int:
         and r.get("instrumentation_guess") in ("voice_only", "voice_duff", "unclear")
         and (args.redo or not r.get("lyrics_english"))
     ]
+    shard_index, shard_count = (int(x) for x in args.shard.split("/"))
+    if shard_count > 1:
+        todo = [r for i, r in enumerate(todo) if i % shard_count == shard_index]
+
     if args.limit:
         todo = todo[: args.limit]
 

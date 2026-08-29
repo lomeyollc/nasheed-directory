@@ -575,6 +575,10 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0, help="0 = all")
     parser.add_argument("--redo", action="store_true", help="Re-analyse already-screened items")
     parser.add_argument("--no-filter", action="store_true", help="Skip the relevance gate")
+    parser.add_argument("--shard", default="0/1",
+                        help="i/n — take only candidates where index %% n == i. Lets several "
+                             "workers run at once on disjoint slices instead of racing for the "
+                             "same tracks.")
     args = parser.parse_args()
 
     if not CANDIDATES.exists():
@@ -601,6 +605,13 @@ def main() -> int:
     # higher than a generic Commons audio search, so a partial run still
     # produces a usable review queue.
     todo.sort(key=lambda c: 0 if c["source_platform"] == "archive.org" else 1)
+
+    # Shard BEFORE limiting, so each worker gets a distinct slice of the whole
+    # pool rather than the same prefix of it.
+    shard_index, shard_count = (int(x) for x in args.shard.split("/"))
+    if shard_count > 1:
+        todo = [c for i, c in enumerate(todo) if i % shard_count == shard_index]
+        print(f"shard {shard_index}/{shard_count}: {len(todo)} candidates")
 
     if args.limit:
         todo = todo[: args.limit]
