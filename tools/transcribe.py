@@ -104,6 +104,20 @@ CONTENT_FLAGS = {
         "(machine gun", "(bomb", "(blast", "(shooting", "(weapon",
         "(sound of gunfire", "(war sounds", "(marching",
     ],
+    # Content from another faith tradition. A cappella hymns, chants and
+    # anthems are abundant in the freely-licensed pools this harvests from, and
+    # they pass every instrumentation check perfectly — unaccompanied voice is
+    # unaccompanied voice. But a gospel hymn or a bhajan auto-published into a
+    # nasheed directory is simply miscategorised, and material attributing
+    # divinity to a created being fails the rubric's lyrical-content clause
+    # outright. Held for a human either way rather than rejected: the reviewer
+    # decides whether it is wrong content or wrong catalog.
+    "other-faith": [
+        "jesus", "christ", "saviour", "savior", "trinity", "gospel", "hallelujah",
+        "alleluia", "amen", "church", "baptism", "crucifi", "the lord my shepherd",
+        "krishna", "rama", "shiva", "bhagavan", "namah", "buddha", "dharma",
+        "torah", "shalom", "adonai", "hare ",
+    ],
     "violence": [
         "kill", "slay", "slaughter", "behead", "blood", "sword", "rifle", "gun",
         "bomb", "explode", "war", "battle", "fight", "army", "soldier", "weapon",
