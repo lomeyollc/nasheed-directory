@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      # `npm ci` refuses the postinstall scripts workerd and esbuild need to
+      # fetch their platform binaries, so allow them explicitly rather than
+      # letting the install succeed and the test run fail with a confusing
+      # "runtime failed to start".
+      - run: npm ci --ignore-scripts=false --foreground-scripts
+
+      - name: Typecheck
+        run: npx tsc -b --noEmit
+
+      - name: Build
+        run: npx vite build
+
+      - name: Test
+        run: npx vitest run
