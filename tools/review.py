@@ -69,8 +69,41 @@ def load_screened() -> list[dict[str, Any]]:
     if not SCREENED.exists():
         return []
     rows = [r for r in json.loads(SCREENED.read_text()) if r.get("status") == "screened"]
+
+    # Recompute the extremist-content markers HERE, on every load, rather than
+    # trusting whatever screen.py stored.
+    #
+    # This is not belt-and-braces, it is a real bug that already happened: the
+    # marker check was added to screen.py after some rows had been screened, so
+    # a track literally titled "Anasheed Alshabaab" sat in the queue with no
+    # flag on it at all. A safety check frozen at write time silently stops
+    # protecting every row written before the check existed — and the marker
+    # list is exactly the kind of thing that keeps growing.
+    for row in rows:
+        row["extremism_flags"] = extremism_flags(row)
+
     rows.sort(key=lambda r: -float(r.get("clean_score") or 0))
     return rows
+
+
+# Kept in sync with tools/screen.py. Duplicated deliberately rather than
+# imported: importing screen.py pulls in TensorFlow, which would make the
+# review server take half a minute to start and require the ML venv just to
+# listen to audio.
+EXTREMIST_MARKERS = [
+    "أسود الله", "دولة الإسلام", "صليل الصوارم", "جهاد", "استشهاد", "مجاهد",
+    "قاعدة", "داعش", "كتائب", "غزوة", "شهداء",
+    "lions of", "islamic state", "clashing of the swords", "clanging of the swords",
+    "jihad", "mujahid", "mujahideen", "martyrdom", "caliphate", "khilafah",
+    "al-qaeda", "isis", "taliban", "shabaab", "ansar", "battalion", "raid on",
+]
+
+
+def extremism_flags(candidate: dict[str, Any]) -> list[str]:
+    haystack = " ".join(
+        str(candidate.get(f) or "") for f in ("title", "artist", "description", "uploader")
+    ).lower()
+    return [m for m in EXTREMIST_MARKERS if m.lower() in haystack]
 
 
 def load_decisions() -> dict[str, dict[str, Any]]:
