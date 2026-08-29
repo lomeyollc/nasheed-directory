@@ -5,3 +5,4 @@ dist
 *.tsbuildinfo
 tools/work/
 tools/.venv/
+tools/models/

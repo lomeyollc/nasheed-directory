@@ -82,7 +82,11 @@ def load_screened() -> list[dict[str, Any]]:
     for row in rows:
         row["extremism_flags"] = extremism_flags(row)
 
-    rows.sort(key=lambda r: -float(r.get("clean_score") or 0))
+    # Tracks whose translated lyrics tripped a content flag sort last: the
+    # reviewer should meet the straightforward ones first and hit the
+    # judgement calls when they are still paying attention, not be worn down
+    # by them at the start.
+    rows.sort(key=lambda r: (bool(r.get("lyrics_flags")), -float(r.get("clean_score") or 0)))
     return rows
 
 
@@ -334,6 +338,19 @@ function render() {
 
     ${(t.percussion_segments || []).length ? `<div class="box"><b>Percussion at</b>
       ${t.percussion_segments.map(s => `<span class="seg" onclick="seek(${s[0]})">${fmt(s[0])}</span>`).join('')}
+      </div>` : ''}
+
+    ${t.lyrics_english ? `<div class="box ${Object.keys(t.lyrics_flags || {}).length ? 'bad' : ''}">
+      <b>Lyrics — machine translation${t.lyrics_language ? ' from ' + esc(t.lyrics_language) : ''}</b>
+      ${Object.keys(t.lyrics_flags || {}).length ? `<div style="color:#f85149;font-weight:600;margin-bottom:6px">
+        Content flags: ${Object.entries(t.lyrics_flags).map(([k,v]) => esc(k) + ' (' + v.map(esc).join(', ') + ')').join(' · ')}
+      </div>` : ''}
+      <div style="font-size:13px;white-space:pre-wrap;max-height:220px;overflow:auto;line-height:1.6">${esc(t.lyrics_english)}</div>
+      <div style="margin-top:8px;font-size:12px;color:#8b949e">
+        Machine translation of sung, reverbed poetry is rough. Good enough to spot praise of a
+        fighting group or romance; NOT good enough to certify a track as fine. If the translation
+        is unreadable, reject rather than guess.
+      </div>
       </div>` : ''}
 
     <div class="box"><b>Top AudioSet labels</b>

@@ -116,10 +116,11 @@ Four stages in `tools/`, each writing a file the next one reads, so any stage ca
 alone:
 
 ```
-harvest.py  →  candidates.json   find freely-licensed candidates (archive.org, Wikimedia)
-screen.py   →  screened.json     download, run YAMNet, flag melodic instruments
-review.py   →  decisions.json    a human listens and decides (local web UI, keyboard-driven)
-publish.py  →  D1 + R2           transcode, normalise loudness, upload, insert
+harvest.py     →  candidates.json  find freely-licensed candidates (archive.org, Wikimedia)
+screen.py      →  screened.json    download, run YAMNet, flag melodic instruments
+transcribe.py  →  screened.json    whisper: lyrics → English, flag content
+review.py      →  decisions.json   a human listens and decides (local web UI, keyboard)
+publish.py     →  D1 + R2          transcode, normalise loudness, upload, insert
 ```
 
 **`screen.py` is a filter, not a verdict.** It is biased toward false positives on purpose: a
@@ -132,12 +133,28 @@ auto-cleared: any percussive track is routed to a human with timestamps marked. 
 from a drum kit is a listening job, and pretending otherwise would be the one place this
 pipeline could quietly put something wrong in the catalog.
 
+**Why transcription is a required stage, not a nicety.** The instrument detector
+is blind to the most dangerous content in this corpus. Jihadi nasheeds are
+overwhelmingly *unaccompanied vocal*, so they pass every instrumentation check
+looking exactly like the ideal catalog entry — measured on this project's own
+harvest, ~9% of freely-licensed archive.org candidates carry markers of that
+genre in the title alone, and titles undercount. Without translated lyrics the
+only honest options were to reject every Arabic track, throwing away most of the
+corpus, or to approve audio whose words nobody in the loop understood.
+
+The strongest signal turned out to be one nobody planned for: **the producing
+studio**. Whisper reliably picks up the spoken ident at the start of a track,
+and a nasheed's producer identifies its politics far more reliably than its
+words do — the words are poetry, the ident is a brand.
+
 ```bash
+brew install whisper-cpp
 python3.12 -m venv tools/.venv
 tools/.venv/bin/pip install tensorflow tensorflow-hub soundfile numpy resampy "setuptools<81"
 
 python3 tools/harvest.py
 tools/.venv/bin/python tools/screen.py
+python3 tools/transcribe.py      # lyrics → English, flags content
 python3 tools/review.py          # http://127.0.0.1:8787 — A/S/D accept, R reject, U unsure
 python3 tools/publish.py --remote
 ```
