@@ -15,6 +15,23 @@ than enough for background audio and keeps the R2 bill near zero.
     python3 tools/publish.py --dry-run     # show what would happen
     python3 tools/publish.py               # local D1
     python3 tools/publish.py --remote      # production D1 + real R2
+
+THE RIGHTS GATE. A row is written only when tools/work/rights.json says WHY
+the rights holder released the track and WHERE that can be checked:
+
+    {
+      "<candidate key, e.g. archive.org:ABDULKHANHAMD>": {
+        "rights_basis": "artist_upload",
+        "rights_evidence_url": "https://archive.org/details/ABDULKHANHAMD",
+        "rights_checked_by": "you@example.com",
+        "rights_checked_at": "2026-11-25T00:00:00+00:00"
+      }
+    }
+
+The licence on the candidate is never enough: it is what the uploader ticked.
+Rows matching `blocked_sources` in D1 are skipped. The database refuses both
+cases anyway (migrations/0003_rights_gate.sql); checking here means one bad
+row does not fail a whole batch after its audio was already uploaded.
 """
 
 from __future__ import annotations
@@ -41,6 +58,17 @@ PUBLISH.mkdir(parents=True, exist_ok=True)
 SCREENED = WORK / "screened.json"
 DECISIONS = WORK / "decisions.json"
 STATE = WORK / "published.json"
+RIGHTS = WORK / "rights.json"
+
+# Must match the CHECK on tracks.rights_basis in migrations/0003_rights_gate.sql.
+RIGHTS_BASES = {
+    "artist_upload",
+    "artist_channel_cc",
+    "artist_platform",
+    "written_permission",
+    "public_domain_by_age",
+}
+PDM_LATEST_YEAR = 1950
 
 BUCKET = "nasheed-audio"
 DB = "nasheed-directory"
@@ -363,6 +391,61 @@ def auto_verifiable(row: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
+def rights_for(row: dict[str, Any], record: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str]:
+    """
+    The rights fields for a row, or (None, why-not).
+
+    Read ONLY from an explicit rights record, never derived from the row's
+    licence. An archive.org licence is whatever the uploader ticked, and
+    treating it as a right is the mistake that took the catalog offline on
+    2026-11-25.
+    """
+    if not record:
+        return None, "no rights basis recorded — a licence chosen by an uploader is not evidence"
+    basis = record.get("rights_basis")
+    if basis not in RIGHTS_BASES:
+        return None, f"unknown rights basis {basis!r}"
+    evidence = str(record.get("rights_evidence_url") or "")
+    if not re.match(r"^https?://", evidence, re.IGNORECASE):
+        return None, "rights basis has no evidence link"
+    if row.get("license") == "public-domain" and basis != "public_domain_by_age":
+        return None, "a public-domain licence needs rights_basis public_domain_by_age"
+    if basis == "public_domain_by_age":
+        match = re.search(r"\b(1[89]\d\d|20\d\d)\b", str(row.get("date") or ""))
+        if match and int(match.group(1)) > PDM_LATEST_YEAR:
+            return None, f"recorded {match.group(1)}, too recent to be public domain by age"
+    return {
+        "rights_basis": basis,
+        "rights_evidence_url": evidence,
+        "rights_checked_by": record.get("rights_checked_by"),
+        "rights_checked_at": record.get("rights_checked_at"),
+    }, ""
+
+
+def blocked_reason(row: dict[str, Any], blocked: list[tuple[str, str]]) -> str | None:
+    """Which blocklist entry a row matches, or None. Same rule as the DB trigger."""
+    fields = {"artist": row.get("artist"), "source_url": row.get("source_url"), "uploader": row.get("uploader")}
+    for kind, value in blocked:
+        mine = fields.get(kind)
+        if mine and str(mine).strip().lower() == str(value).strip().lower():
+            return f"blocked {kind}"
+    return None
+
+
+def fetch_blocked(remote: bool) -> list[tuple[str, str]] | None:
+    """The blocklist from D1. None if it could not be read — the caller stops."""
+    cmd = [WRANGLER, "d1", "execute", DB, "--json", "--command",
+           "SELECT kind, value FROM blocked_sources", "--remote" if remote else "--local"]
+    result = run_bounded(cmd, timeout=120)
+    if result is None or result.returncode != 0:
+        return None
+    try:
+        rows = json.loads(result.stdout)[0]["results"]
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return None
+    return [(r["kind"], r["value"]) for r in rows]
+
+
 class AlreadyRunning(Exception):
     pass
 
@@ -424,6 +507,17 @@ def main() -> int:
 
     screened = {r["key"]: r for r in json.loads(SCREENED.read_text()) if r.get("key")}
     decisions = json.loads(DECISIONS.read_text()) if DECISIONS.exists() else {}
+    rights_records: dict[str, Any] = json.loads(RIGHTS.read_text()) if RIGHTS.exists() else {}
+
+    # Fail closed: a publish that cannot read the blocklist does not run.
+    blocked = fetch_blocked(args.remote)
+    if blocked is None:
+        if not args.dry_run:
+            print("Could not read blocked_sources from D1 — not publishing.", file=sys.stderr)
+            lock.unlink(missing_ok=True)
+            return 1
+        print("! could not read blocked_sources; dry run continues without it\n")
+        blocked = []
 
     # Recompute the safety flags here rather than trusting what was stored.
     # Same reasoning as review.py: a flag list added after a row was written
@@ -456,8 +550,8 @@ def main() -> int:
                     "instrumentation": "voice_only",
                     "automated": True,
                     "note": "Automated verification: no melodic instrument or percussion detected, "
-                            "lyrics transcribed and screened, licence read from source. "
-                            "No human has listened to this track.",
+                            "lyrics transcribed and screened. The rights basis is recorded "
+                            "separately in rights_basis. No human has listened to this track.",
                     "decided_at": datetime.now(timezone.utc).isoformat(),
                 }))
                 auto_ok += 1
@@ -470,8 +564,28 @@ def main() -> int:
         print()
     todo = [(k, d) for k, d in accepted if k not in published]
 
-    print(f"{len(accepted)} accepted, {len(published)} already published, {len(todo)} to publish\n")
-    if not todo:
+    # The rights gate, before any audio is transcoded or uploaded.
+    gated: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    held: dict[str, int] = {}
+    for key, decision in todo:
+        row = screened[key]
+        why = blocked_reason(row, blocked)
+        rights = None
+        if not why:
+            rights, why = rights_for(row, rights_records.get(key))
+        if rights is None:
+            bucket = why.split(" — ")[0]
+            held[bucket] = held.get(bucket, 0) + 1
+            continue
+        gated.append((key, decision, rights))
+    if held:
+        print(f"rights gate: {sum(held.values())} held back")
+        for reason, count in sorted(held.items(), key=lambda kv: -kv[1]):
+            print(f"    {count:4}  {reason}")
+        print()
+
+    print(f"{len(accepted)} accepted, {len(published)} already published, {len(gated)} to publish\n")
+    if not gated:
         print("Nothing to do.")
         return 0
 
@@ -479,9 +593,9 @@ def main() -> int:
     statements: list[str] = []
     now = datetime.now(timezone.utc).isoformat()
 
-    for index, (key, decision) in enumerate(todo, 1):
+    for index, (key, decision, rights) in enumerate(gated, 1):
         row = screened[key]
-        print(f"[{index}/{len(todo)}] {row['title'][:60]}")
+        print(f"[{index}/{len(gated)}] {row['title'][:60]}")
 
         src = AUDIO / row["local_audio"]
         if not src.exists():
@@ -509,7 +623,8 @@ def main() -> int:
             "loudness_lufs, is_loopable, lyrics_language, content_reviewed, license, license_url, "
             "attribution_text, source_url, source_platform, verification_status, verified_by, "
             "verified_at, review_notes, r2_key, file_format, file_size_bytes, sha256, mood, tags, "
-            "published, submitted_by, created_at, updated_at) VALUES ("
+            "published, submitted_by, created_at, updated_at, rights_basis, rights_evidence_url, "
+            "rights_checked_by, rights_checked_at, source_uploader) VALUES ("
             + ", ".join([
                 sql_str(track_id), sql_str(slug), sql_str(row["title"]), "NULL",
                 sql_str(row.get("artist")), sql_str(row.get("artist_url")), "NULL",
@@ -548,6 +663,10 @@ def main() -> int:
                 "1",
                 sql_str(f"harvest:{row.get('source_platform')}"),
                 sql_str(now), sql_str(now),
+                sql_str(rights["rights_basis"]), sql_str(rights["rights_evidence_url"]),
+                sql_str(rights["rights_checked_by"]), sql_str(rights["rights_checked_at"]),
+                # Never returned by the API; stored so blocked_sources can match it.
+                sql_str(row.get("uploader")),
             ])
             + ");"
         )

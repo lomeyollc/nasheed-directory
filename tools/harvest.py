@@ -24,6 +24,16 @@ Only licences that permit COMMERCIAL reuse and DERIVATIVES are collected. NC
 and ND are dropped here rather than later, so nobody downstream has to
 remember the rule. See LICENCE_ALLOW below.
 
+A LICENCE FOUND HERE IS A CLAIM, NOT A RIGHT. On archive.org the licence is
+whatever the uploader ticked, and on 2026-11-25 that took the whole catalog
+offline: 104 of 110 tracks carried a Public Domain Mark set by people who had
+re-uploaded commercial albums. So this stage never sets `rights_basis`. That
+is a separate fact, recorded only after someone checks that the artist or
+label chose the licence themselves (see tools/publish.py and
+migrations/0003_rights_gate.sql). And a Public Domain Mark on a recording
+from after 1950, or with no date at all, is dropped here: the mark is meant
+for very old works, so on anything newer it is evidence of nothing.
+
 Usage:
     python3 tools/harvest.py                 # all sources, default terms
     python3 tools/harvest.py --source archive --limit 500
@@ -63,6 +73,34 @@ SEARCH_TERMS = [
     "a cappella vocal", "vocal chant", "throat chant", "unaccompanied voice",
     "frame drum", "daf drum", "bendir", "duff",
 ]
+
+
+# The last year of recording we accept a Public Domain Mark for. The mark is
+# Creative Commons' label for "free of known copyright, typically very old
+# works" — it is not a licence an owner gives (owners use CC0). On a 2010s
+# naat album it is almost certainly false, so it is refused, not flagged.
+PDM_LATEST_YEAR = 1950
+
+
+def recording_year(value: Any) -> int | None:
+    """The first plausible year in an archive.org / Commons date field."""
+    if isinstance(value, list):
+        value = value[0] if value else None
+    match = re.search(r"\b(1[89]\d\d|20\d\d)\b", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+def pdm_allowed(date: Any) -> bool:
+    """A Public Domain Mark is believed only on a dated recording from 1950 or earlier."""
+    year = recording_year(date)
+    return year is not None and year <= PDM_LATEST_YEAR
+
+
+def accept_licence(licence: str | None, date: Any) -> str | None:
+    """The licence to keep for a candidate, or None to drop the candidate."""
+    if licence == "public-domain" and not pdm_allowed(date):
+        return None
+    return licence
 
 
 def run_curl(url: str, timeout: int = 120, attempts: int = 4) -> dict[str, Any]:
@@ -170,28 +208,10 @@ def harvest_archive(terms: Iterable[str], per_term: int = 2000) -> list[dict[str
             if not items:
                 break
             for item in items:
-                licence = normalise_licence(item.get("licenseurl"))
-                if not licence:
+                candidate = archive_candidate(item, term)
+                if candidate is None or candidate["source_id"] in out:
                     continue
-                ident = item["identifier"]
-                if ident in out:
-                    continue
-                out[ident] = {
-                    "source_platform": "archive.org",
-                    "source_id": ident,
-                    "source_url": f"https://archive.org/details/{ident}",
-                    "title": str(item.get("title") or ident)[:300],
-                    "artist": first_str(item.get("creator")),
-                    # Kept deliberately: on archive.org the uploader is very
-                    # often NOT the rights holder, and that mismatch is the
-                    # single most common way a "CC-BY" claim turns out to be
-                    # someone re-uploading a commercial album.
-                    "uploader": item.get("uploader"),
-                    "license": licence,
-                    "license_url": item.get("licenseurl"),
-                    "matched_term": term,
-                    "subjects": item.get("subject"),
-                }
+                out[candidate["source_id"]] = candidate
             seen += len(items)
             cursor = data.get("cursor")
             if not cursor:
@@ -201,6 +221,33 @@ def harvest_archive(terms: Iterable[str], per_term: int = 2000) -> list[dict[str
         checkpoint(list(out.values()))
         time.sleep(4)  # archive.org throttles a fast term-by-term sweep
     return list(out.values())
+
+
+def archive_candidate(item: dict[str, Any], term: str) -> dict[str, Any] | None:
+    """One archive.org search hit as a candidate, or None if its licence is not usable."""
+    licence = accept_licence(normalise_licence(item.get("licenseurl")), item.get("date"))
+    if not licence:
+        return None
+    ident = item["identifier"]
+    return {
+        "source_platform": "archive.org",
+        "source_id": ident,
+        "source_url": f"https://archive.org/details/{ident}",
+        "title": str(item.get("title") or ident)[:300],
+        "artist": first_str(item.get("creator")),
+        # Kept deliberately: on archive.org the uploader is very often NOT the
+        # rights holder, and that mismatch is the single most common way a
+        # "CC-BY" claim turns out to be someone re-uploading a commercial
+        # album. publish.py stores it (never shown by the API) so that
+        # blocked_sources can refuse an uploader.
+        "uploader": item.get("uploader"),
+        "date": item.get("date"),
+        # What the UPLOADER chose. Never a rights basis on its own.
+        "license": licence,
+        "license_url": item.get("licenseurl"),
+        "matched_term": term,
+        "subjects": item.get("subject"),
+    }
 
 
 def first_str(value: Any) -> str | None:
@@ -233,7 +280,8 @@ def harvest_commons(terms: Iterable[str]) -> list[dict[str, Any]]:
             meta = info.get("extmetadata") or {}
             licence_url = (meta.get("LicenseUrl") or {}).get("value")
             short = (meta.get("LicenseShortName") or {}).get("value", "")
-            licence = normalise_licence(licence_url) or normalise_short_name(short)
+            date = (meta.get("DateTimeOriginal") or {}).get("value")
+            licence = accept_licence(normalise_licence(licence_url) or normalise_short_name(short), date)
             if not licence or not info.get("url"):
                 continue
             title = page.get("title", "").removeprefix("File:")
@@ -246,6 +294,7 @@ def harvest_commons(terms: Iterable[str]) -> list[dict[str, Any]]:
                 "artist": strip_html((meta.get("Artist") or {}).get("value", "")) or None,
                 "license": licence,
                 "license_url": licence_url,
+                "date": date,
                 "matched_term": term,
                 "file_size_bytes": info.get("size"),
             }
@@ -259,8 +308,12 @@ def normalise_short_name(short: str) -> str | None:
     low = short.lower()
     if "nc" in low or "nd" in low:
         return None
-    if "cc0" in low or "public domain" in low:
+    if "cc0" in low:
         return "CC0"
+    # Not CC0. CC0 is a dedication the owner makes; a "public domain" tag is a
+    # claim about age, and has to pass the date rule in accept_licence.
+    if "public domain" in low:
+        return "public-domain"
     if "cc by-sa" in low:
         return "CC-BY-SA"
     if "cc by" in low:
@@ -294,6 +347,9 @@ def harvest_openverse(terms: Iterable[str]) -> list[dict[str, Any]]:
                 licence = {"cc0": "CC0", "by": "CC-BY", "by-sa": "CC-BY-SA", "pdm": "public-domain"}.get(
                     (item.get("license") or "").lower()
                 )
+                # Openverse gives no recording date, so a mark here can never
+                # pass the date rule and is dropped.
+                licence = accept_licence(licence, None)
                 if not licence:
                     continue
                 ident = item.get("id")
