@@ -94,7 +94,10 @@ async function serveAudio(request: Request, env: Env, url: URL): Promise<Respons
     headers.set("ETag", `"${row.sha256}"`);
   }
 
-  if (object.range && "offset" in object.range) {
+  // Only when the client asked for a range. R2 reports a range on every
+  // object, so testing `object.range` alone answered every plain download
+  // with 206 Partial Content.
+  if (range && object.range && "offset" in object.range) {
     const offset = object.range.offset ?? 0;
     const length = object.range.length ?? object.size - offset;
     headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
