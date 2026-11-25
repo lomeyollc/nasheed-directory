@@ -97,8 +97,8 @@ export default function BrowsePage() {
         </h1>
         <p className="text-muted max-w-2xl leading-relaxed">
           Every track here is human voice only, or voice with duff — no melodic instruments — and
-          freely licensed for commercial use. A person listened to each one before it was
-          published. Built so an AI agent editing a video can pick music without guessing.
+          freely licensed for commercial use. Each track shows how it was checked: by software
+          only, or by a person who listened to it. Built so an AI agent editing a video can pick music without guessing.
         </p>
 
         {stats && (
@@ -149,7 +149,7 @@ export default function BrowsePage() {
         <div className="text-center py-20 text-muted">
           <p className="mb-2">Nothing matches those filters yet.</p>
           <p className="text-sm">
-            The catalog only holds tracks a human has listened to, so it grows slowly on purpose.
+            Every track is offline while we confirm that each licence came from the rights holder.
           </p>
         </div>
       )}

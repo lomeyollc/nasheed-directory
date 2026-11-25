@@ -162,8 +162,13 @@ Every published track is one of:
   voice_duff   voice plus duff (frame drum) only
   duff_only    frame drum alone
 
-No melodic instruments. No NonCommercial or NoDerivatives licences. Every
-track has been listened to by a human before publication.
+No melodic instruments. No NonCommercial or NoDerivatives licences. Each
+track record says how it was checked, in \`verification_status\`:
+  automated_verified   software checked it; no person has listened to it
+  maintainer_verified  a maintainer listened to the whole track
+
+Status, 2026-11-25: every track is offline while we confirm that each
+licence came from the rights holder, not from someone who re-uploaded it.
 
 ## The rubric
 
