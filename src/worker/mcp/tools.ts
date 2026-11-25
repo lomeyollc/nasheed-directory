@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { AuthedKey } from "../lib/auth";
 import { getStats, getTrackBySlug, searchTracks } from "../lib/query";
 import { RUBRIC } from "../lib/rubric";
+import { createSubmission, SUBMITTER_RELATIONSHIPS } from "../lib/submissions";
 
 /**
  * MCP tools.
@@ -35,7 +36,9 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
       title: "Search halal background audio",
       description:
         "Search the catalog of vocals-only and duff-only tracks. Every result is instrument-free " +
-        "(voice and duff only), freely licensed for commercial use, and human-verified. " +
+        "(voice and duff only) and was released under an open commercial licence by its artist or " +
+        "label, with the evidence in `rights_evidence_url`. `verification_status` says how the audio " +
+        "was checked: automated_verified means no person has listened. " +
         "Filter by duration when you need audio to fit a specific clip length.",
       inputSchema: {
         query: z.string().optional().describe("Free text over title, artist, description and lyrics"),
@@ -64,7 +67,8 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
       title: "Get one track",
       description:
         "Full record for one track by slug, including the direct audio URL, the exact attribution " +
-        "string to reproduce, lyrics where known, and the detector evidence behind its classification.",
+        "string to reproduce, the rights basis and its evidence link, lyrics where known, and the " +
+        "detector evidence behind its classification.",
       inputSchema: { slug: z.string() },
     },
     async ({ slug }) => {
@@ -185,13 +189,21 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
     {
       title: "Submit a track for review",
       description:
-        "Propose a freely-licensed halal track. It enters a review queue and is NOT added to the " +
-        "catalog until a maintainer has listened to it and checked the licence. Only submit audio " +
-        "whose rights holder actually released it freely — a licence asserted by a re-uploader is " +
-        "the most common way a 'copyright-free' claim turns out to be false.",
+        "Propose a track for the catalog. Only the artist, the label, or someone holding written " +
+        "permission from them may submit, and you must link the evidence: where the artist or label " +
+        "released the track under an open commercial licence themselves, or the permission. A licence " +
+        "chosen by someone who re-uploaded the file is not accepted. The track enters a review queue " +
+        "and is never published automatically.",
       inputSchema: {
         title: z.string(),
-        source_url: z.string().url().describe("Where the audio and its licence can be verified"),
+        source_url: z.string().url().describe("Where the audio can be found"),
+        relationship: z
+          .enum(SUBMITTER_RELATIONSHIPS)
+          .describe("Who the submitter is to the recording: the artist, the label, or holds written permission"),
+        rights_evidence_url: z
+          .string()
+          .url()
+          .describe("Where the artist or label released it under the licence themselves, or the written permission"),
         artist: z.string().optional(),
         claimed_license: z.string().optional(),
         claimed_instrumentation: z.string().optional(),
@@ -199,36 +211,25 @@ export function registerTools(server: McpServer, env: McpEnv, key: AuthedKey): v
       },
     },
     async (args) => {
-      const existing = await env.DB.prepare(
-        "SELECT id FROM submissions WHERE source_url = ? AND status = 'pending' LIMIT 1"
-      )
-        .bind(args.source_url)
-        .first<{ id: string }>();
-      if (existing) {
-        return asText({ status: "already_pending", id: existing.id });
+      const result = await createSubmission(env.DB, {
+        title: args.title,
+        source_url: args.source_url,
+        relationship: args.relationship,
+        rights_evidence_url: args.rights_evidence_url,
+        artist: args.artist ?? null,
+        claimed_license: args.claimed_license ?? null,
+        claimed_instrumentation: args.claimed_instrumentation ?? null,
+        notes: args.notes ?? null,
+        submitter_name: key.name ? `api-key:${key.name}` : "api-key",
+      });
+      if (!result.ok) {
+        return asText({ error: result.error });
       }
-
-      const id = crypto.randomUUID();
-      await env.DB.prepare(
-        `INSERT INTO submissions
-           (id, title, artist, source_url, claimed_license, claimed_instrumentation,
-            notes, submitter_name, status, created_at)
-         VALUES (?,?,?,?,?,?,?,?, 'pending', ?)`
-      )
-        .bind(
-          id,
-          args.title,
-          args.artist ?? null,
-          args.source_url,
-          args.claimed_license ?? null,
-          args.claimed_instrumentation ?? null,
-          args.notes ?? null,
-          key.name ? `api-key:${key.name}` : "api-key",
-          new Date().toISOString()
-        )
-        .run();
-
-      return asText({ status: "pending", id, message: "Queued for maintainer review." });
+      return asText({
+        status: result.status,
+        id: result.id,
+        message: "Queued for maintainer review. A maintainer checks the rights evidence before anything is published.",
+      });
     }
   );
 }

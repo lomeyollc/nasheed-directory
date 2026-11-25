@@ -16,6 +16,14 @@ const INSTRUMENTATION_FILTERS = [
   { value: "duff_only", label: "Duff only" },
 ];
 
+const RIGHTS_LABEL: Record<string, string> = {
+  artist_upload: "artist's own upload",
+  artist_channel_cc: "artist's channel, CC",
+  artist_platform: "artist's own site",
+  written_permission: "written permission",
+  public_domain_by_age: "public domain by age",
+};
+
 const LENGTH_FILTERS = [
   { value: "", label: "Any length", min: undefined, max: undefined },
   { value: "short", label: "Under 1 min", min: undefined, max: 60 },
@@ -96,9 +104,12 @@ export default function BrowsePage() {
           Background audio you don't have to verify by ear
         </h1>
         <p className="text-muted max-w-2xl leading-relaxed">
-          Every track here is human voice only, or voice with duff — no melodic instruments — and
-          freely licensed for commercial use. Each track shows how it was checked: by software
-          only, or by a person who listened to it. Built so an AI agent editing a video can pick music without guessing.
+          Every track here is human voice only, or voice with duff — no melodic instruments. A
+          track is listed only when the artist or label released it under an open commercial
+          licence themselves, and each card links the evidence. Each card also says how the audio
+          was checked: by software only, or by a person who listened. That bar is strict, so the
+          catalog is small for now. Built so an AI agent editing a video can pick music without
+          guessing.
         </p>
 
         {stats && (
@@ -148,8 +159,10 @@ export default function BrowsePage() {
       {!loading && !error && tracks.length === 0 && (
         <div className="text-center py-20 text-muted">
           <p className="mb-2">Nothing matches those filters yet.</p>
-          <p className="text-sm">
-            Every track is offline while we confirm that each licence came from the rights holder.
+          <p className="text-sm max-w-xl mx-auto">
+            The catalog is small on purpose. A track is listed only when the artist or label
+            released it under an open licence themselves. On 2026-11-25 we took every older track
+            offline, because their licences had been set by people who re-uploaded them.
           </p>
         </div>
       )}
@@ -255,6 +268,19 @@ function TrackCard({
               <ShieldCheck size={11} className="inline mr-1" />
               scholar reviewed
             </Badge>
+          )}
+          {track.verification_status === "maintainer_verified" && <Badge>a person listened</Badge>}
+          {track.verification_status === "automated_verified" && <Badge>checked by software only</Badge>}
+          {track.rights_basis && track.rights_evidence_url && (
+            <a
+              href={track.rights_evidence_url}
+              target="_blank"
+              rel="noreferrer"
+              title="Evidence that the artist or label chose this licence"
+              className="text-[11px] px-2 py-0.5 rounded-md border border-line text-muted bg-ink/60 hover:text-white hover:border-accent/40 transition"
+            >
+              rights: {RIGHTS_LABEL[track.rights_basis] ?? track.rights_basis} ↗
+            </a>
           )}
         </div>
       </div>

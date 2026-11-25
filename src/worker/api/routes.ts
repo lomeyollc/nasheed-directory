@@ -1,6 +1,7 @@
 import { authenticate, generateApiKey, hashToken, json, unauthorized } from "../lib/auth";
 import { getStats, getTrackBySlug, searchTracks, type SearchParams } from "../lib/query";
 import { RUBRIC } from "../lib/rubric";
+import { createSubmission as storeSubmission } from "../lib/submissions";
 
 /**
  * REST surface, mounted at /api.
@@ -10,7 +11,8 @@ import { RUBRIC } from "../lib/rubric";
  *   GET  /api/v1/random            one random track, honouring the same filters
  *   GET  /api/v1/stats             catalog counts
  *   GET  /api/v1/rubric            the halal rubric, as data
- *   POST /api/v1/submissions       propose a track (no key needed)
+ *   POST /api/v1/submissions       propose a track (no key needed; the artist,
+ *                                  label or a permission holder only)
  *   POST /api/v1/keys              issue a read key (no key needed, self-serve)
  *
  *   GET  /api/public/*             the same reads, unauthenticated, for the
@@ -150,9 +152,10 @@ function parseSearchParams(url: URL): SearchParams {
 }
 
 /**
- * Anyone may propose a track. Submissions land in their own table and are
- * never visible from the catalog until a maintainer reviews them, so an open
- * endpoint here cannot put an unvetted claim in front of a consumer.
+ * The artist, the label, or someone with written permission may propose a
+ * track. Submissions land in their own table and are never visible from the
+ * catalog until a maintainer reviews them, so an open endpoint here cannot
+ * put an unvetted claim in front of a consumer.
  */
 async function createSubmission(request: Request, env: Env): Promise<Response> {
   let body: Record<string, unknown>;
@@ -162,54 +165,35 @@ async function createSubmission(request: Request, env: Env): Promise<Response> {
     return json({ error: "Body must be JSON" }, 400);
   }
 
-  const title = str(body.title);
-  const sourceUrl = str(body.source_url);
-  if (!title || !sourceUrl) {
-    return json({ error: "title and source_url are required" }, 400);
-  }
-  if (!/^https?:\/\//i.test(sourceUrl)) {
-    return json({ error: "source_url must be an http(s) URL" }, 400);
-  }
+  const result = await storeSubmission(env.DB, {
+    title: str(body.title),
+    source_url: str(body.source_url),
+    relationship: str(body.relationship),
+    rights_evidence_url: str(body.rights_evidence_url),
+    artist: str(body.artist),
+    claimed_license: str(body.claimed_license),
+    claimed_instrumentation: str(body.claimed_instrumentation),
+    notes: str(body.notes),
+    submitter_name: str(body.submitter_name),
+    submitter_contact: str(body.submitter_contact),
+  });
 
-  const existing = await env.DB.prepare(
-    "SELECT id FROM submissions WHERE source_url = ? AND status = 'pending' LIMIT 1"
-  )
-    .bind(sourceUrl)
-    .first<{ id: string }>();
-  if (existing) {
+  if (!result.ok) {
+    return json({ error: result.error }, 400);
+  }
+  if (result.status === "already_pending") {
     return json(
-      { status: "already_pending", id: existing.id, message: "That source URL is already queued for review." },
+      { status: "already_pending", id: result.id, message: "That source URL is already queued for review." },
       200
     );
   }
-
-  const id = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO submissions
-       (id, title, artist, source_url, claimed_license, claimed_instrumentation,
-        notes, submitter_name, submitter_contact, status, created_at)
-     VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)`
-  )
-    .bind(
-      id,
-      title,
-      str(body.artist),
-      sourceUrl,
-      str(body.claimed_license),
-      str(body.claimed_instrumentation),
-      str(body.notes),
-      str(body.submitter_name),
-      str(body.submitter_contact),
-      new Date().toISOString()
-    )
-    .run();
-
   return json(
     {
       status: "pending",
-      id,
+      id: result.id,
       message:
-        "Thank you. A maintainer will listen to the whole track and check the licence before it enters the catalog.",
+        "Thank you. A maintainer will check your rights evidence and the audio before anything is " +
+        "published. Nothing is published automatically from a submission.",
     },
     201
   );

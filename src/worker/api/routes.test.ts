@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { applyD1Migrations, env } from "cloudflare:test";
 import { beforeAll, describe, expect, it } from "vitest";
 import { handleApiRequest } from "./routes";
 
@@ -9,34 +9,6 @@ import { handleApiRequest } from "./routes";
  * string rewrite, so it needs a test.
  */
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS tracks (
-  id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, title TEXT NOT NULL,
-  title_original TEXT, artist TEXT, artist_url TEXT, description TEXT,
-  instrumentation TEXT NOT NULL, detector_evidence TEXT, detector_version TEXT,
-  duration_seconds REAL NOT NULL, sample_rate INTEGER, channels INTEGER,
-  loudness_lufs REAL, is_loopable INTEGER NOT NULL DEFAULT 0, lyrics_language TEXT,
-  lyrics_text TEXT, lyrics_translation TEXT, content_reviewed INTEGER NOT NULL DEFAULT 0,
-  license TEXT NOT NULL, license_url TEXT, attribution_text TEXT, source_url TEXT NOT NULL,
-  source_platform TEXT, permission_evidence TEXT,
-  verification_status TEXT NOT NULL DEFAULT 'community_submitted',
-  verified_by TEXT, verified_at TEXT, review_notes TEXT, r2_key TEXT, file_format TEXT,
-  file_size_bytes INTEGER, sha256 TEXT, mood TEXT, tags TEXT NOT NULL DEFAULT '[]',
-  published INTEGER NOT NULL DEFAULT 0, submitted_by TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
-  title, title_original, artist, description, lyrics_text, tags,
-  content='tracks', content_rowid='rowid');
-CREATE TABLE IF NOT EXISTS submissions (
-  id TEXT PRIMARY KEY, title TEXT NOT NULL, artist TEXT, source_url TEXT NOT NULL,
-  claimed_license TEXT, claimed_instrumentation TEXT, notes TEXT, submitter_name TEXT,
-  submitter_contact TEXT, status TEXT NOT NULL DEFAULT 'pending', review_notes TEXT,
-  reviewed_by TEXT, reviewed_at TEXT, accepted_track_id TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS api_tokens (
-  id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, name TEXT,
-  scope TEXT NOT NULL DEFAULT 'read', owner_email TEXT, created_at TEXT NOT NULL,
-  last_used_at TEXT, revoked_at TEXT);
-`;
 
 const ORIGIN = "https://nasheed.lomeyo.com";
 
@@ -45,9 +17,7 @@ function request(path: string, init?: RequestInit): Request {
 }
 
 beforeAll(async () => {
-  for (const statement of SCHEMA.split(";").filter((s) => s.trim())) {
-    await env.DB.prepare(statement).run();
-  }
+  await applyD1Migrations(env.DB, env.TEST_MIGRATIONS);
 });
 
 describe("public mirror", () => {
@@ -114,51 +84,108 @@ describe("keyed surface", () => {
   });
 });
 
+/** Every field the rights gate needs from a submitter, on top of a title. */
+const RIGHTS = {
+  relationship: "artist",
+  rights_evidence_url: "https://example.org/my-own-channel/this-track",
+};
+
+function submit(body: Record<string, unknown>): Promise<Response> {
+  return handleApiRequest(
+    request("/api/v1/submissions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+    env
+  );
+}
+
 describe("submissions", () => {
   it("accepts a submission without a key", async () => {
-    const response = await handleApiRequest(
-      request("/api/v1/submissions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "A Test Nasheed", source_url: "https://example.org/one" }),
-      }),
-      env
-    );
+    const response = await submit({ title: "A Test Nasheed", source_url: "https://example.org/one", ...RIGHTS });
     expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({ status: "pending" });
   });
 
   it("requires title and source_url", async () => {
-    const response = await handleApiRequest(
-      request("/api/v1/submissions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "No URL" }),
-      }),
-      env
-    );
+    const response = await submit({ title: "No URL", ...RIGHTS });
     expect(response.status).toBe(400);
   });
 
   it("rejects a non-http source_url", async () => {
-    const response = await handleApiRequest(
-      request("/api/v1/submissions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Bad", source_url: "javascript:alert(1)" }),
-      }),
-      env
-    );
+    const response = await submit({ title: "Bad", source_url: "javascript:alert(1)", ...RIGHTS });
     expect(response.status).toBe(400);
   });
 
   it("does not queue the same source twice", async () => {
-    const body = JSON.stringify({ title: "Dup", source_url: "https://example.org/dup" });
-    const headers = { "Content-Type": "application/json" };
-    const first = await handleApiRequest(request("/api/v1/submissions", { method: "POST", headers, body }), env);
+    const body = { title: "Dup", source_url: "https://example.org/dup", ...RIGHTS };
+    const first = await submit(body);
     expect(first.status).toBe(201);
-    const second = await handleApiRequest(request("/api/v1/submissions", { method: "POST", headers, body }), env);
+    const second = await submit(body);
     expect(await second.json()).toMatchObject({ status: "already_pending" });
+  });
+});
+
+describe("submissions: the rights gate", () => {
+  it("refuses a submission that does not say who the submitter is to the recording", async () => {
+    // "I found it online" is how the 2026-11-25 catalog was built. Only the
+    // artist, the label, or someone holding written permission may submit.
+    const response = await submit({
+      title: "Found it",
+      source_url: "https://example.org/found",
+      rights_evidence_url: RIGHTS.rights_evidence_url,
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toMatch(/relationship/);
+  });
+
+  it("refuses a relationship outside artist, label or written permission", async () => {
+    const response = await submit({
+      title: "A fan",
+      source_url: "https://example.org/fan",
+      relationship: "fan",
+      rights_evidence_url: RIGHTS.rights_evidence_url,
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("refuses a submission with no rights evidence link", async () => {
+    const response = await submit({ title: "No proof", source_url: "https://example.org/no-proof", relationship: "label" });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { error: string }).error).toMatch(/rights_evidence_url/);
+  });
+
+  it("refuses a rights evidence link that is not http(s)", async () => {
+    const response = await submit({
+      title: "Bad proof",
+      source_url: "https://example.org/bad-proof",
+      relationship: "artist",
+      rights_evidence_url: "ask me",
+    });
+    expect(response.status).toBe(400);
+  });
+
+  it("stores the relationship and the evidence, and never publishes", async () => {
+    const response = await submit({
+      title: "Stored",
+      source_url: "https://example.org/stored",
+      relationship: "written_permission",
+      rights_evidence_url: "https://example.org/permission-letter",
+    });
+    const { id } = (await response.json()) as { id: string };
+    const row = await env.DB.prepare(
+      "SELECT submitter_relationship, rights_evidence_url, status FROM submissions WHERE id = ?"
+    )
+      .bind(id)
+      .first<{ submitter_relationship: string; rights_evidence_url: string; status: string }>();
+    expect(row).toEqual({
+      submitter_relationship: "written_permission",
+      rights_evidence_url: "https://example.org/permission-letter",
+      status: "pending",
+    });
+    const tracks = await env.DB.prepare("SELECT COUNT(*) AS n FROM tracks").first<{ n: number }>();
+    expect(tracks?.n).toBe(0);
   });
 });
 

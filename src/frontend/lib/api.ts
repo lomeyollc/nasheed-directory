@@ -18,7 +18,11 @@ export interface Track {
   attribution_text: string | null;
   source_url: string;
   source_platform: string | null;
-  verification_status: "maintainer_verified" | "scholar_reviewed" | "community_submitted";
+  rights_basis: string | null;
+  rights_evidence_url: string | null;
+  rights_checked_by: string | null;
+  rights_checked_at: string | null;
+  verification_status: "automated_verified" | "maintainer_verified" | "scholar_reviewed" | "community_submitted";
   verified_by: string | null;
   verified_at: string | null;
   mood: string | null;
@@ -42,6 +46,7 @@ export interface Stats {
   by_license: Record<string, number>;
   by_verification: Record<string, number>;
   by_language: Record<string, number>;
+  by_rights_basis: Record<string, number>;
   pending_submissions: number;
 }
 

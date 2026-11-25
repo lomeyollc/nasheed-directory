@@ -24,8 +24,13 @@ CREATE TABLE IF NOT EXISTS tracks (
   verified_by TEXT, verified_at TEXT, review_notes TEXT, r2_key TEXT,
   file_format TEXT, file_size_bytes INTEGER, sha256 TEXT, mood TEXT,
   tags TEXT NOT NULL DEFAULT '[]', published INTEGER NOT NULL DEFAULT 0,
-  submitted_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  submitted_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  rights_basis TEXT, rights_evidence_url TEXT, rights_checked_by TEXT,
+  rights_checked_at TEXT, source_uploader TEXT
 );
+CREATE TABLE IF NOT EXISTS blocked_sources (
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, value TEXT NOT NULL,
+  reason TEXT NOT NULL, added_by TEXT NOT NULL, added_at TEXT NOT NULL);
 CREATE VIRTUAL TABLE IF NOT EXISTS tracks_fts USING fts5(
   title, title_original, artist, description, lyrics_text, tags,
   content='tracks', content_rowid='rowid');
@@ -46,6 +51,8 @@ interface Seed {
   title?: string;
   duration?: number;
   license?: string;
+  /** Defaults to a valid basis. Pass null to seed a row the trigger would refuse. */
+  rights_basis?: string | null;
 }
 
 async function seed(rows: Seed[]): Promise<void> {
@@ -54,14 +61,15 @@ async function seed(rows: Seed[]): Promise<void> {
   }
   await env.DB.prepare("DELETE FROM tracks").run();
   await env.DB.prepare("DELETE FROM tracks_fts").run();
+  await env.DB.prepare("DELETE FROM blocked_sources").run();
 
   const now = new Date().toISOString();
   for (const row of rows) {
     await env.DB.prepare(
       `INSERT INTO tracks (id, slug, title, instrumentation, duration_seconds, license,
         source_url, verification_status, published, r2_key, file_format, tags,
-        created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?, '[]', ?, ?)`
+        rights_basis, rights_evidence_url, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?, '[]', ?, ?, ?, ?)`
     )
       .bind(
         crypto.randomUUID(),
@@ -75,6 +83,8 @@ async function seed(rows: Seed[]): Promise<void> {
         row.published,
         `${row.slug}.mp3`,
         "mp3",
+        row.rights_basis === undefined ? "artist_upload" : row.rights_basis,
+        row.rights_basis === null ? null : "https://example.org/rights",
         now,
         now
       )
@@ -131,6 +141,22 @@ describe("searchTracks safety filters", () => {
     const result = await searchTracks(env.DB, APP, {});
     expect(result.tracks.map((t) => t.slug).sort()).toEqual(["clean-duff", "clean-voice"]);
     expect(result.total).toBe(2);
+  });
+});
+
+describe("rights filter on reads", () => {
+  beforeEach(async () => {
+    await seed([
+      { slug: "with-rights", instrumentation: "voice_only", verification_status: "maintainer_verified", published: 1 },
+      // Only reachable by bypassing the trigger. The read path must still
+      // refuse it: two mechanisms, so one bug cannot break the promise alone.
+      { slug: "licence-only", instrumentation: "voice_only", verification_status: "maintainer_verified", published: 1, rights_basis: null },
+    ]);
+  });
+
+  it("never returns a published track that has no rights basis", async () => {
+    const result = await searchTracks(env.DB, APP, { include_unverified: true });
+    expect(result.tracks.map((t) => t.slug)).toEqual(["with-rights"]);
   });
 });
 

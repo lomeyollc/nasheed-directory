@@ -8,6 +8,17 @@ export type VerificationStatus =
 
 export type License = "CC0" | "CC-BY" | "CC-BY-SA" | "public-domain" | "author-permission";
 
+/**
+ * Why we believe the rights holder chose the licence. A licence string alone
+ * is only a claim by whoever uploaded the file. See migrations/0003_rights_gate.sql.
+ */
+export type RightsBasis =
+  | "artist_upload"
+  | "artist_channel_cc"
+  | "artist_platform"
+  | "written_permission"
+  | "public_domain_by_age";
+
 /** A row of `tracks`, exactly as D1 returns it (0/1 for booleans, JSON as text). */
 export interface TrackRow {
   id: string;
@@ -49,6 +60,12 @@ export interface TrackRow {
   submitted_by: string | null;
   created_at: string;
   updated_at: string;
+  rights_basis: RightsBasis | null;
+  rights_evidence_url: string | null;
+  rights_checked_by: string | null;
+  rights_checked_at: string | null;
+  /** Often a personal email address. Never copied into the public `Track`. */
+  source_uploader: string | null;
 }
 
 /** The public shape. Booleans are booleans and tags is an array. */
@@ -73,6 +90,10 @@ export interface Track {
   attribution_text: string | null;
   source_url: string;
   source_platform: string | null;
+  rights_basis: RightsBasis | null;
+  rights_evidence_url: string | null;
+  rights_checked_by: string | null;
+  rights_checked_at: string | null;
   verification_status: VerificationStatus;
   verified_by: string | null;
   verified_at: string | null;
@@ -107,6 +128,10 @@ export function toTrack(row: TrackRow, appUrl: string): Track {
     attribution_text: row.attribution_text,
     source_url: row.source_url,
     source_platform: row.source_platform,
+    rights_basis: row.rights_basis,
+    rights_evidence_url: row.rights_evidence_url,
+    rights_checked_by: row.rights_checked_by,
+    rights_checked_at: row.rights_checked_at,
     verification_status: row.verification_status,
     verified_by: row.verified_by,
     verified_at: row.verified_at,

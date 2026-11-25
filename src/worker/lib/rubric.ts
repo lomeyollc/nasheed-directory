@@ -17,13 +17,13 @@
  * true. Nothing here is a fatwa.
  */
 
-export const RUBRIC_VERSION = "1.0.0";
+export const RUBRIC_VERSION = "1.1.0";
 
 export interface RubricClause {
   id: string;
   rule: string;
   /** How this clause is actually checked, so the claim is auditable. */
-  checked_by: "signal_analysis" | "human_review" | "license_document";
+  checked_by: "signal_analysis" | "human_review" | "license_document" | "rights_evidence";
   /** What makes a track FAIL this clause. */
   disqualifies: string[];
 }
@@ -34,12 +34,14 @@ export const RUBRIC: {
   position: string;
   clauses: RubricClause[];
   verification_tiers: Record<string, string>;
+  rights_bases: Record<string, string>;
   accepted_licenses: Record<string, string>;
 } = {
   version: RUBRIC_VERSION,
   summary:
     "Human voice only, or human voice with duff (frame drum) only. No melodic instruments. " +
-    "No impermissible lyrical content. Freely licensed for commercial reuse.",
+    "No impermissible lyrical content. Published only when the artist or label released it under " +
+    "an open commercial licence themselves, with the evidence linked.",
   position:
     "This directory applies the stricter scholarly position that melodic instruments are not " +
     "permitted, with the duff (frame drum) as the recognised exception. This is not the only " +
@@ -92,12 +94,25 @@ export const RUBRIC: {
     },
     {
       id: "license",
-      rule: "The recording must be freely licensed for commercial reuse and redistribution by its actual rights holder.",
+      rule: "The licence must permit commercial reuse and derivatives.",
       checked_by: "license_document",
       disqualifies: [
         "NonCommercial (NC) licenses — they break the promise that this audio is usable in monetised work.",
         "NoDerivatives (ND) licenses — they prevent trimming, looping, and mixing under a video.",
-        "A license asserted by a third-party uploader who is not the rights holder. Common on public archives and the single biggest source of false 'copyright-free' claims.",
+      ],
+    },
+    {
+      id: "rights",
+      rule:
+        "A track is published only when the artist or label released it under an open commercial " +
+        "licence themselves, with the evidence linked. Every track record carries `rights_basis` " +
+        "(why we believe the rights holder chose the licence) and `rights_evidence_url` (where anyone " +
+        "can check it). The database refuses to publish a track without both.",
+      checked_by: "rights_evidence",
+      disqualifies: [
+        "A licence chosen by the person who uploaded the file, with no evidence they are the artist or label. On public archives anyone can upload anyone's album and tick a Creative Commons box, and this is the single biggest source of false 'copyright-free' claims. It is why every track was taken offline on 2026-11-25.",
+        "A Public Domain Mark on a recording made after 1950, or with no date. The mark is for very old works; it is not a licence an owner gives (owners use CC0).",
+        "Any recording from a source on our blocklist: militant distributors, and accounts that re-upload other people's albums.",
       ],
     },
   ],
@@ -108,7 +123,7 @@ export const RUBRIC: {
     automated_verified:
       "NO HUMAN HAS LISTENED TO THIS TRACK. A machine checked it: signal analysis found no melodic " +
       "instrument and no percussion at all, the audio was transcribed and translated and its lyrics " +
-      "tripped no content flag, and the licence was read from its source. The detector and model " +
+      "tripped no content flag. The rights basis is a separate check, recorded in `rights_basis`. The detector and model " +
       "versions are recorded in `verified_by` and the evidence in `detector_evidence`. This tier is " +
       "held to a STRICTER instrumentation bar than a human reviewer applies, because a machine gets " +
       "no benefit of the doubt — but machine translation of sung poetry is rough, so treat it as a " +
@@ -119,11 +134,25 @@ export const RUBRIC: {
       "A named person with scholarly standing signed off. Attributed and dated.",
   },
 
+  rights_bases: {
+    artist_upload:
+      "The artist or label uploaded the file themselves and chose the licence. The evidence link shows the account is theirs.",
+    artist_channel_cc:
+      "The artist's own channel publishes the recording under a Creative Commons licence, and the file we host was sent to us by the artist. We never download from a video platform.",
+    artist_platform:
+      "The artist's own website or label page offers the recording under the licence.",
+    written_permission:
+      "The rights holder gave written permission. `permission_evidence` records how.",
+    public_domain_by_age:
+      "The recording was made in 1950 or earlier and is out of copyright by age, shown by the evidence link.",
+  },
+
   accepted_licenses: {
     CC0: "Public-domain dedication. No attribution required, though it is still good manners.",
     "CC-BY": "Free reuse including commercial, attribution required.",
     "CC-BY-SA": "As CC-BY, but derivative works must carry the same license. Note this before using it under a video you license differently.",
-    "public-domain": "Out of copyright, or never eligible for it.",
+    "public-domain":
+      "Out of copyright by age: recorded in 1950 or earlier, with rights_basis public_domain_by_age. A Public Domain Mark set by an uploader on a newer recording is not accepted.",
     "author-permission":
       "The rights holder gave explicit written permission. `permission_evidence` records how, so the claim stays auditable.",
   },

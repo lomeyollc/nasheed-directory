@@ -6,3 +6,4 @@ dist
 tools/work/
 tools/.venv/
 tools/models/
+__pycache__/

@@ -15,13 +15,15 @@ interface Rubric {
   position: string;
   clauses: Clause[];
   verification_tiers: Record<string, string>;
+  rights_bases?: Record<string, string>;
   accepted_licenses: Record<string, string>;
 }
 
 const CHECKED_BY_LABEL: Record<string, string> = {
   signal_analysis: "Checked by signal analysis",
-  human_review: "Checked by a person listening",
+  human_review: "Checked by a person, except on automated_verified tracks",
   license_document: "Checked against the licence document",
+  rights_evidence: "Checked against a linked proof that the artist or label chose the licence",
 };
 
 export default function RubricPage() {
@@ -85,6 +87,20 @@ export default function RubricPage() {
           </div>
         ))}
       </dl>
+
+      {rubric.rights_bases && (
+        <>
+          <h2 className="text-xl font-semibold mb-4">Rights bases</h2>
+          <dl className="space-y-3 mb-12">
+            {Object.entries(rubric.rights_bases).map(([basis, meaning]) => (
+              <div key={basis} className="bg-ink-2 border border-line rounded-xl p-4">
+                <dt className="font-mono text-sm text-accent mb-1">{basis}</dt>
+                <dd className="text-sm text-muted">{meaning}</dd>
+              </div>
+            ))}
+          </dl>
+        </>
+      )}
 
       <h2 className="text-xl font-semibold mb-4">Accepted licences</h2>
       <dl className="space-y-3">

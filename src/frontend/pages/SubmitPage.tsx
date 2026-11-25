@@ -7,6 +7,8 @@ export default function SubmitPage() {
     title: "",
     artist: "",
     source_url: "",
+    relationship: "",
+    rights_evidence_url: "",
     claimed_license: "",
     claimed_instrumentation: "",
     notes: "",
@@ -50,7 +52,7 @@ export default function SubmitPage() {
         <CheckCircle2 size={44} className="text-accent mx-auto mb-4" />
         <h1 className="text-2xl font-bold mb-3">Thank you</h1>
         <p className="text-muted leading-relaxed mb-6">
-          A maintainer will listen to the whole track and check the licence before it enters the
+          A maintainer will check your rights evidence and the audio before anything enters the
           catalog. Nothing is published on a submitter's word — that is what keeps the catalog
           worth trusting.
         </p>
@@ -65,8 +67,8 @@ export default function SubmitPage() {
     <div className="mx-auto max-w-2xl px-5 py-10">
       <h1 className="text-3xl font-bold mb-3">Submit a track</h1>
       <p className="text-muted leading-relaxed mb-8">
-        Anyone can propose a track. Two things to check before you do, because they are what most
-        submissions get wrong:
+        The artist, the label, or someone with written permission from them can propose a track.
+        Two things to check before you do, because they are what most submissions get wrong:
       </p>
 
       <ul className="space-y-3 mb-8 text-sm">
@@ -74,7 +76,9 @@ export default function SubmitPage() {
           <b className="block mb-1">The licence must come from the rights holder</b>
           <span className="text-muted">
             Someone re-uploading an album to a public archive and ticking a Creative Commons box
-            does not make it freely licensed. Link to where the artist themselves released it.
+            does not make it freely licensed. A track is published only when the artist or label
+            released it under an open commercial licence themselves, so link the evidence: where
+            they released it, or the written permission.
           </span>
         </li>
         <li className="bg-ink-2 border border-line rounded-xl p-4">
@@ -100,6 +104,31 @@ export default function SubmitPage() {
           placeholder="Where the audio and its licence can be verified"
           value={form.source_url}
           onChange={set("source_url")}
+        />
+
+        <label className="block">
+          <span className="text-sm font-medium block mb-1.5">
+            Who are you to this recording?<span className="text-accent ml-1">*</span>
+          </span>
+          <select
+            required
+            value={form.relationship}
+            onChange={set("relationship")}
+            className="w-full bg-ink-2 border border-line rounded-lg px-3 py-2 text-sm outline-none focus:border-accent/60"
+          >
+            <option value="">Choose one</option>
+            <option value="artist">I am the artist</option>
+            <option value="label">I am the label</option>
+            <option value="written_permission">I have written permission from the artist or label</option>
+          </select>
+        </label>
+        <Field
+          label="Rights evidence URL"
+          required
+          type="url"
+          placeholder="Where the artist or label released it under this licence, or the permission"
+          value={form.rights_evidence_url}
+          onChange={set("rights_evidence_url")}
         />
 
         <div className="grid sm:grid-cols-2 gap-4">

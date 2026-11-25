@@ -20,6 +20,11 @@ metadata, and no metadata exists.
 So this catalog stores the fact that is missing: **what instruments are in the recording**, as a
 first-class, queryable field, alongside a licence that actually permits commercial use.
 
+**A track is published only when the artist or label released it under an open commercial licence
+themselves, with the evidence linked.** On 2026-11-25 every earlier track was taken offline: their
+licences came from archive.org, where whoever uploads a file picks the licence, and almost none of
+those uploaders were the rights holder. The catalog is small for now because of that rule.
+
 ## What "halal background audio" means here
 
 | Rule | What fails it |
@@ -28,7 +33,8 @@ first-class, queryable field, alongside a licence that actually permits commerci
 | **Duff is the only percussion** | Drum kits, drum machines, tuned percussion |
 | **Clean lyrics** | Romance, shirk, profanity, glorification of the impermissible |
 | **No instrument imitation** | Beatboxing as a drum track, vocal pads used as an instrumental bed |
-| **Freely licensed** | NonCommercial (NC), NoDerivatives (ND), or a licence asserted by a re-uploader |
+| **Freely licensed** | NonCommercial (NC) or NoDerivatives (ND) licences |
+| **Released by the rights holder** | A licence chosen by a re-uploader, a Public Domain Mark on a recording made after 1950, or a source on our blocklist |
 
 This applies the **stricter** scholarly position — that melodic instruments are not permitted,
 with the duff as the recognised exception. That is not the only position among Muslims. It is
@@ -38,20 +44,31 @@ view, while the reverse is not true.
 **This is a tool, not a fatwa.** The rubric is published as data at `/api/v1/rubric` precisely so
 you can read the rule, disagree with a clause, and filter on the raw facts instead.
 
-### Three kinds of claim, kept separate
+### Four kinds of claim, kept separate
 
 The schema deliberately never collapses these into one `is_halal` boolean:
 
 1. **Observable facts** — `instrumentation`, `detector_evidence`. Reproducible by anyone.
-2. **A licence fact** — `license`, `license_url`, `source_url`. Checkable against a document.
-3. **A human judgement** — `verification_status`, always attributed and dated.
+2. **A licence claim** — `license`, `license_url`, `source_url`. What the source says.
+3. **A rights fact** — `rights_basis`, `rights_evidence_url`. Why we believe the artist or label
+   chose that licence, and where you can check it.
+4. **A judgement** — `verification_status`, always attributed and dated.
 
-A consumer who distrusts our judgement can ignore (3) entirely and filter on (1).
+A consumer who distrusts our judgement can ignore (4) entirely and filter on (1).
+
+| `rights_basis` | Meaning |
+|---|---|
+| `artist_upload` | The artist or label uploaded the file themselves and chose the licence |
+| `artist_channel_cc` | The artist's own channel marks it Creative Commons, and the artist sent us the file. We never download from a video platform |
+| `artist_platform` | The artist's own website or label page offers it under the licence |
+| `written_permission` | The rights holder gave written permission |
+| `public_domain_by_age` | Recorded in 1950 or earlier, out of copyright by age |
 
 | `verification_status` | Meaning |
 |---|---|
 | `scholar_reviewed` | A named person with scholarly standing signed off |
 | `maintainer_verified` | A maintainer listened to the whole track and applied the rubric |
+| `automated_verified` | Software checked it. **No person has listened.** Exclude with `include_automated=false` |
 | `community_submitted` | In the database, vetted by nobody. **Never returned by default** |
 
 ## Using it
@@ -98,13 +115,16 @@ the exact string to reproduce — use it rather than assembling your own.
 
 ## Contributing a track
 
-Open [a submission](https://nasheed.lomeyo.com/submit), or `POST /api/v1/submissions`.
+Open [a submission](https://nasheed.lomeyo.com/submit), or `POST /api/v1/submissions`. Only the
+artist, the label, or someone with their written permission may submit: send `relationship`
+(`artist`, `label` or `written_permission`) and `rights_evidence_url`.
 
 Two things most submissions get wrong:
 
 - **The licence must come from the rights holder.** Someone re-uploading an album to a public
   archive and ticking a Creative Commons box does not make it freely licensed. This is the single
-  most common way a "copyright-free" claim turns out to be false.
+  most common way a "copyright-free" claim turns out to be false. Link where the artist or label
+  released it, or the written permission.
 - **Voice and duff only.** If you are unsure whether that percussion is a duff, submit anyway and
   say so in the notes — that is exactly what review is for.
 
@@ -122,6 +142,12 @@ transcribe.py  →  screened.json    whisper: lyrics → English, flag content
 review.py      →  decisions.json   a human listens and decides (local web UI, keyboard)
 publish.py     →  D1 + R2          transcode, normalise loudness, upload, insert
 ```
+
+**A licence found by `harvest.py` is a claim, not a right.** No stage turns it into a
+`rights_basis`. `publish.py` writes a row only when `tools/work/rights.json` records the rights
+basis and evidence for it (format in the script's docstring), and it skips anything matching
+`blocked_sources`. A Public Domain Mark on a recording made after 1950, or with no date, is
+dropped at harvest. The pipeline never downloads from YouTube or any video platform.
 
 **`screen.py` is a filter, not a verdict.** It is biased toward false positives on purpose: a
 clean track wrongly flagged costs one human listen, while an instrumental track wrongly passed
@@ -156,6 +182,7 @@ python3 tools/harvest.py
 tools/.venv/bin/python tools/screen.py
 python3 tools/transcribe.py      # lyrics → English, flags content
 python3 tools/review.py          # http://127.0.0.1:8787 — A/S/D accept, R reject, U unsure
+python3 -m unittest tools/test_rights.py   # the ingest's rights rules
 python3 tools/publish.py --remote
 ```
 
@@ -165,7 +192,7 @@ python3 tools/publish.py --remote
 npm install
 npx wrangler d1 create nasheed-directory     # put the id in wrangler.jsonc
 npx wrangler r2 bucket create nasheed-audio
-npx wrangler d1 execute nasheed-directory --remote --file migrations/0001_init.sql
+npm run d1:migrate:remote                    # applies every file in migrations/
 npm run deploy
 ```
 
@@ -174,10 +201,17 @@ catalog is small and read-heavy, so nothing needs durable per-entity coordinatio
 
 ### The one invariant
 
-A track can only be `published = 1` when it is instrument-clean, human-verified, and mirrored to
-R2. This is enforced by a **database trigger** in `migrations/0001_init.sql`, not only in the
-request handler — so a future bug in an API route, an import script, or a migration cannot
-quietly publish something that fails the rubric.
+A track can only be `published = 1` when it is instrument-clean, verified (by software or a
+person, never an unvetted submission), mirrored to R2, has a `rights_basis` and a
+`rights_evidence_url`, and matches nothing in `blocked_sources`. This is enforced by **database
+triggers** (latest in `migrations/0003_rights_gate.sql`), not only in the request handler — so a
+future bug in an API route, an import script, or a migration cannot quietly publish something
+that fails the rubric. Every public read applies the same rule a second time, so blocking a source
+hides its tracks at once.
+
+`blocked_sources` lists artists, source URLs and uploaders whose recordings are refused (militant
+distributors, accounts that re-upload other people's albums). Its rows hold personal email
+addresses, so they live only in the database, never in this repository.
 
 ## Licence
 

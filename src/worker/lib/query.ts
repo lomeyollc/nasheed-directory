@@ -6,10 +6,35 @@ import { toTrack, type Track, type TrackRow } from "./types";
  *
  * Both the REST surface (`/api/v1/tracks`) and the MCP surface
  * (`search_nasheeds`) call this. They must never grow their own SQL: the
- * default filters below — published only, instrument-clean only,
- * human-verified only — are a safety property, and a second query builder is
- * a second place for that property to be forgotten.
+ * default filters below — published only, instrument-clean only, verified
+ * only, rights evidence only, no blocked source — are a safety property, and a
+ * second query builder is a second place for that property to be forgotten.
  */
+
+/**
+ * The rule every public read applies, in one place: published, instrument-
+ * clean, a recorded rights basis with evidence, and not from a blocked
+ * source. The publish triggers in migrations/0003_rights_gate.sql enforce the
+ * same rule on write; this is the second mechanism, so one bug cannot break
+ * the promise alone.
+ *
+ * The blocklist check matters most here. A trigger only runs when a row is
+ * written, so a source found to be militant AFTER its tracks were published
+ * would stay live until someone remembered to unpublish them. Checked on
+ * read, adding the block row is enough.
+ *
+ * Expects the tracks table to be aliased `t`.
+ */
+export const PUBLIC_TRACK_SQL = `t.published = 1
+  AND t.instrumentation IN (${CLEAN_INSTRUMENTATION.map((v) => `'${v}'`).join(",")})
+  AND t.rights_basis IS NOT NULL
+  AND t.rights_evidence_url IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM blocked_sources b
+    WHERE (b.kind = 'artist'     AND lower(trim(b.value)) = lower(trim(t.artist)))
+       OR (b.kind = 'source_url' AND lower(trim(b.value)) = lower(trim(t.source_url)))
+       OR (b.kind = 'uploader'   AND lower(trim(b.value)) = lower(trim(t.source_uploader)))
+  )`;
 
 export interface SearchParams {
   q?: string;
@@ -58,14 +83,11 @@ export async function searchTracks(
   appUrl: string,
   params: SearchParams
 ): Promise<SearchResult> {
-  const where: string[] = ["t.published = 1"];
+  // Non-negotiable: a melodic instrument, a track with no rights evidence,
+  // or a blocked source never leaves this function, no matter what the
+  // caller passed. The publish triggers enforce the same thing on write.
+  const where: string[] = [PUBLIC_TRACK_SQL];
   const binds: unknown[] = [];
-
-  // Non-negotiable: a melodic instrument never leaves this function, no
-  // matter what the caller passed. The publish trigger in 0001_init.sql
-  // enforces the same thing from the other side.
-  where.push(`t.instrumentation IN (${CLEAN_INSTRUMENTATION.map(() => "?").join(",")})`);
-  binds.push(...CLEAN_INSTRUMENTATION);
 
   if (!params.include_unverified) {
     const tiers = params.include_automated === false ? HUMAN_TIERS : TRUSTED_TIERS;
@@ -155,7 +177,7 @@ export async function getTrackBySlug(
   slug: string
 ): Promise<Track | null> {
   const row = await db
-    .prepare("SELECT * FROM tracks WHERE slug = ? AND published = 1 LIMIT 1")
+    .prepare(`SELECT t.* FROM tracks t WHERE t.slug = ? AND ${PUBLIC_TRACK_SQL} LIMIT 1`)
     .bind(slug)
     .first<TrackRow>();
   return row ? toTrack(row, appUrl) : null;
@@ -168,23 +190,22 @@ export interface CatalogStats {
   by_license: Record<string, number>;
   by_verification: Record<string, number>;
   by_language: Record<string, number>;
+  by_rights_basis: Record<string, number>;
   pending_submissions: number;
 }
 
 export async function getStats(db: D1Database): Promise<CatalogStats> {
-  const clean = `published = 1 AND instrumentation IN (${CLEAN_INSTRUMENTATION.map(() => "?").join(",")})`;
-  const c = [...CLEAN_INSTRUMENTATION];
+  // The same rule the search uses, so `published_tracks` is exactly the
+  // number of tracks anyone can actually fetch.
+  const from = `FROM tracks t WHERE ${PUBLIC_TRACK_SQL}`;
 
-  const [totals, instr, lic, ver, lang, subs] = await db.batch<Record<string, unknown>>([
-    db
-      .prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(duration_seconds),0) AS d FROM tracks WHERE ${clean}`)
-      .bind(...c),
-    db.prepare(`SELECT instrumentation AS k, COUNT(*) AS n FROM tracks WHERE ${clean} GROUP BY 1`).bind(...c),
-    db.prepare(`SELECT license AS k, COUNT(*) AS n FROM tracks WHERE ${clean} GROUP BY 1`).bind(...c),
-    db.prepare(`SELECT verification_status AS k, COUNT(*) AS n FROM tracks WHERE ${clean} GROUP BY 1`).bind(...c),
-    db
-      .prepare(`SELECT COALESCE(lyrics_language,'unknown') AS k, COUNT(*) AS n FROM tracks WHERE ${clean} GROUP BY 1`)
-      .bind(...c),
+  const [totals, instr, lic, ver, lang, rights, subs] = await db.batch<Record<string, unknown>>([
+    db.prepare(`SELECT COUNT(*) AS n, COALESCE(SUM(t.duration_seconds),0) AS d ${from}`),
+    db.prepare(`SELECT t.instrumentation AS k, COUNT(*) AS n ${from} GROUP BY 1`),
+    db.prepare(`SELECT t.license AS k, COUNT(*) AS n ${from} GROUP BY 1`),
+    db.prepare(`SELECT t.verification_status AS k, COUNT(*) AS n ${from} GROUP BY 1`),
+    db.prepare(`SELECT COALESCE(t.lyrics_language,'unknown') AS k, COUNT(*) AS n ${from} GROUP BY 1`),
+    db.prepare(`SELECT t.rights_basis AS k, COUNT(*) AS n ${from} GROUP BY 1`),
     db.prepare("SELECT COUNT(*) AS n FROM submissions WHERE status = 'pending'"),
   ]);
 
@@ -196,6 +217,7 @@ export async function getStats(db: D1Database): Promise<CatalogStats> {
     by_license: tally(lic.results),
     by_verification: tally(ver.results),
     by_language: tally(lang.results),
+    by_rights_basis: tally(rights.results),
     pending_submissions: Number((subs.results?.[0] as { n?: number } | undefined)?.n ?? 0),
   };
 }

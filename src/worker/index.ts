@@ -1,6 +1,7 @@
 import { handleApiRequest } from "./api/routes";
 import { json } from "./lib/auth";
 import { handleMcpRequest } from "./mcp";
+import { PUBLIC_TRACK_SQL } from "./lib/query";
 import { RUBRIC } from "./lib/rubric";
 import type { TrackRow } from "./lib/types";
 
@@ -61,8 +62,10 @@ async function serveAudio(request: Request, env: Env, url: URL): Promise<Respons
   }
 
   const slug = file.replace(/\.[a-z0-9]+$/i, "");
+  // The same rule as every catalog read: an unpublished, rights-unchecked or
+  // blocked track's audio is not served, even though the file stays in R2.
   const row = await env.DB.prepare(
-    "SELECT r2_key, file_format, sha256, id FROM tracks WHERE slug = ? AND published = 1 LIMIT 1"
+    `SELECT t.r2_key, t.file_format, t.sha256, t.id FROM tracks t WHERE t.slug = ? AND ${PUBLIC_TRACK_SQL} LIMIT 1`
   )
     .bind(slug)
     .first<Pick<TrackRow, "r2_key" | "file_format" | "sha256" | "id">>();
@@ -162,13 +165,24 @@ Every published track is one of:
   voice_duff   voice plus duff (frame drum) only
   duff_only    frame drum alone
 
-No melodic instruments. No NonCommercial or NoDerivatives licences. Each
-track record says how it was checked, in \`verification_status\`:
+No melodic instruments. No NonCommercial or NoDerivatives licences.
+
+A track is published only when the artist or label released it under an open
+commercial licence themselves, with the evidence linked. Each record says why
+in \`rights_basis\` (artist_upload, artist_channel_cc, artist_platform,
+written_permission, public_domain_by_age) and links the proof in
+\`rights_evidence_url\`. A licence chosen by someone who re-uploaded the file
+is not accepted, and neither is a Public Domain Mark on a recording made after
+1950. The database refuses to publish a track without both fields.
+
+Each track record also says how its audio was checked, in
+\`verification_status\`:
   automated_verified   software checked it; no person has listened to it
   maintainer_verified  a maintainer listened to the whole track
 
-Status, 2026-11-25: every track is offline while we confirm that each
-licence came from the rights holder, not from someone who re-uploaded it.
+Status, 2026-11-25: 3 tracks. On this date every earlier track was taken
+offline because its licence had been set by someone who re-uploaded it, not
+by the artist or label. Tracks come back only with rights evidence.
 
 ## The rubric
 
@@ -202,6 +216,11 @@ CC-BY and CC-BY-SA tracks require credit. Every track record carries an
 
 ## Contributing
 
+Only the artist, the label, or someone with their written permission may
+submit a track. Send \`relationship\` (artist, label or written_permission)
+and \`rights_evidence_url\` with the submission. Nothing is published
+automatically from a submission.
+
 Submit a track: POST ${appUrl}/api/v1/submissions
 Source and issues: https://github.com/lomeyollc/nasheed-directory
 `;
@@ -214,8 +233,9 @@ function openApiSpec(appUrl: string): unknown {
       title: "Nasheed Directory API",
       version: "1.0.0",
       description:
-        "Catalog of halal, freely-licensed background audio: voice-only and duff-only tracks, " +
-        "human-verified, usable in commercial work.",
+        "Catalog of halal background audio: voice-only and duff-only tracks, each released under an " +
+        "open commercial licence by its artist or label, with the evidence linked in rights_evidence_url. " +
+        "verification_status says how the audio was checked; automated_verified means no person has listened.",
       license: { name: "MIT", url: "https://github.com/lomeyollc/nasheed-directory/blob/main/LICENSE" },
     },
     servers: [{ url: appUrl }],
@@ -261,7 +281,40 @@ function openApiSpec(appUrl: string): unknown {
       "/api/v1/random": { get: { summary: "One random track matching the same filters" } },
       "/api/v1/rubric": { get: { summary: "The halal rubric this catalog applies" } },
       "/api/v1/stats": { get: { summary: "Catalog counts" } },
-      "/api/v1/submissions": { post: { summary: "Propose a track for review", security: [] } },
+      "/api/v1/submissions": {
+        post: {
+          summary: "Propose a track for review (the artist, the label, or a permission holder only)",
+          security: [],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["title", "source_url", "relationship", "rights_evidence_url"],
+                  properties: {
+                    title: { type: "string" },
+                    source_url: { type: "string", format: "uri" },
+                    relationship: { type: "string", enum: ["artist", "label", "written_permission"] },
+                    rights_evidence_url: {
+                      type: "string",
+                      format: "uri",
+                      description: "Where the artist or label released it under the licence, or the written permission",
+                    },
+                    artist: { type: "string" },
+                    claimed_license: { type: "string" },
+                    claimed_instrumentation: { type: "string" },
+                    notes: { type: "string" },
+                    submitter_name: { type: "string" },
+                    submitter_contact: { type: "string" },
+                  },
+                },
+              },
+            },
+          },
+          responses: { "201": { description: "Queued for review" }, "400": { description: "Missing or invalid field" } },
+        },
+      },
       "/api/v1/keys": { post: { summary: "Issue a free read key", security: [] } },
       "/audio/{slug}.{ext}": { get: { summary: "Stream the audio (Range supported)", security: [] } },
     },
